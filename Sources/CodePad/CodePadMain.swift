@@ -89,19 +89,27 @@ final class CodePadAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         let hosting = NSHostingController(rootView: MainEditorWorkspaceView())
+        // CRITICAL: Disable NSHostingController auto-sizing constraints on NSWindow so the window
+        // opens at full 1280x820 and can be resized freely to any size by dragging corners/edges!
+        hosting.sizingOptions = []
+
+        let defaultRect = NSRect(x: 0, y: 0, width: 1280, height: 820)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1220, height: 780),
+            contentRect: defaultRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        window.title = "CodePad"
-        window.titleVisibility = .hidden
+        window.title = "CodePad — Sublime Code & Markdown Pad"
         window.titlebarAppearsTransparent = true
-        window.minSize = NSSize(width: 720, height: 480)
+        window.isOpaque = true
+        window.backgroundColor = WorkspaceStore.shared.effectivePalette.chromeBackgroundNS
+        window.minSize = NSSize(width: 760, height: 480)
+        window.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         window.contentViewController = hosting
+        window.setContentSize(defaultRect.size)
         window.center()
-        window.setFrameAutosaveName("CodePadMainWindow_v1")
+        window.setFrameAutosaveName("CodePadMainWindow_v2")
         window.isReleasedWhenClosed = false
         window.delegate = self
 

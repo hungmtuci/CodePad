@@ -530,17 +530,20 @@ final class WorkspaceStore: ObservableObject {
         }
 
         let host = NSHostingController(rootView: FloatingPreviewWindowRootView())
+        host.sizingOptions = []
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 780, height: 720),
+            contentRect: NSRect(x: 0, y: 0, width: 840, height: 740),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         win.title = "CodePad — Xem trước trực tiếp (Live Preview)"
-        win.toolbarStyle = .unifiedCompact
-        win.minSize = NSSize(width: 420, height: 340)
+        win.titlebarAppearsTransparent = true
+        win.minSize = NSSize(width: 460, height: 340)
+        win.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         win.contentViewController = host
-        win.setFrameAutosaveName("CodePadFloatingPreviewWin_v1")
+        win.setContentSize(NSSize(width: 840, height: 740))
+        win.setFrameAutosaveName("CodePadFloatingPreviewWin_v2")
         win.center()
         win.isReleasedWhenClosed = false
 

@@ -81,7 +81,7 @@ struct NativeCodeEditorView: NSViewRepresentable {
                 }
             }
             highlightWorkItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.045, execute: item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: item)
         }
 
         func reportCursorTelemetry(from textView: NSTextView) {
@@ -94,7 +94,7 @@ struct NativeCodeEditorView: NSViewRepresentable {
             if safeLoc > 0 {
                 var idx = 0
                 while idx < safeLoc {
-                    if ns.character(at: idx) == 10 { // '\n'
+                    if ns.character(at: idx) == 10 {
                         line += 1
                         lastNewlineIdx = idx + 1
                     }
@@ -129,27 +129,45 @@ final class CodeEditorContainerNSView: NSView {
     private var currentPalette: EditorThemePalette = EditorThemeID.monokaiPro.palette
     private var currentLanguage: CodeLanguage = .plainText
     private var currentParagraphStyle = NSMutableParagraphStyle()
+    private var isWordWrapActive: Bool = true
+    private var lastSyncedContentWidth: CGFloat = 0
+
+    override var isOpaque: Bool { true }
 
     func configure(coordinator: NativeCodeEditorView.Coordinator, initialParent: NativeCodeEditorView) {
         self.coordinator = coordinator
         coordinator.containerView = self
+
+        // CRITICAL on macOS 14+: NSView.clipsToBounds defaults to false!
+        // Always enable clipsToBounds so custom draw(_:) never paints outside subview bounds.
         wantsLayer = true
+        clipsToBounds = true
+        gutterView.wantsLayer = true
+        gutterView.clipsToBounds = true
+        scrollView.wantsLayer = true
+        scrollView.clipsToBounds = true
+        minimapView.wantsLayer = true
+        minimapView.clipsToBounds = true
 
         // Explicit TextKit 1 stack for rock-solid line metrics & zero flicker
         textStorageRef = NSTextStorage()
         layoutManagerRef = NSLayoutManager()
         textStorageRef.addLayoutManager(layoutManagerRef)
 
-        textContainerRef = NSTextContainer(containerSize: NSSize(width: 10_000, height: CGFloat.greatestFiniteMagnitude))
+        textContainerRef = NSTextContainer(containerSize: NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude))
         textContainerRef.lineFragmentPadding = 8
+        textContainerRef.widthTracksTextView = true
         layoutManagerRef.addTextContainer(textContainerRef)
 
-        textView = CodeTextView(frame: .zero, textContainer: textContainerRef)
-        textView.minSize = NSSize(width: 0, height: 0)
+        textView = CodeTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 480), textContainer: textContainerRef)
+        textView.minSize = NSSize(width: 120, height: 120)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = true
+        textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
+        textView.drawsBackground = true
+        textView.isEditable = true
+        textView.isSelectable = true
         textView.isRichText = false
         textView.importsGraphics = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -160,7 +178,7 @@ final class CodeEditorContainerNSView: NSView {
         textView.isGrammarCheckingEnabled = false
         textView.allowsUndo = true
         textView.usesFindBar = false
-        textView.textContainerInset = NSSize(width: 8, height: 12)
+        textView.textContainerInset = NSSize(width: 10, height: 14)
         textView.delegate = coordinator
         textView.onFileURLDropped = { [weak coordinator] url in
             coordinator?.parent.onOpenDroppedFile(url)
@@ -190,7 +208,7 @@ final class CodeEditorContainerNSView: NSView {
         addSubview(minimapView)
 
         gutterWidthConstraint = gutterView.widthAnchor.constraint(equalToConstant: 48)
-        minimapWidthConstraint = minimapView.widthAnchor.constraint(equalToConstant: 78)
+        minimapWidthConstraint = minimapView.widthAnchor.constraint(equalToConstant: 76)
 
         NSLayoutConstraint.activate([
             gutterView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -221,6 +239,38 @@ final class CodeEditorContainerNSView: NSView {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    override func layout() {
+        super.layout()
+        scrollView.layoutSubtreeIfNeeded()
+        syncTextViewWidthToScrollViewIfNeeded()
+    }
+
+    private func syncTextViewWidthToScrollViewIfNeeded() {
+        let contentW = max(140, scrollView.contentSize.width)
+        let contentH = max(140, scrollView.contentSize.height)
+        textView.minSize = NSSize(width: contentW, height: contentH)
+
+        if isWordWrapActive {
+            if abs(contentW - lastSyncedContentWidth) > 0.5 || abs(textView.frame.width - contentW) > 0.5 {
+                lastSyncedContentWidth = contentW
+                var f = textView.frame
+                f.size.width = contentW
+                f.size.height = max(f.size.height, contentH)
+                textView.frame = f
+                textContainerRef.containerSize = NSSize(width: max(80, contentW - textView.textContainerInset.width * 2), height: .greatestFiniteMagnitude)
+                layoutManagerRef.ensureLayout(for: textContainerRef)
+                gutterView.needsDisplay = true
+                updateMinimapViewportAndReportScroll()
+            }
+        } else {
+            if textView.frame.width < contentW {
+                var f = textView.frame
+                f.size.width = contentW
+                textView.frame = f
+            }
+        }
     }
 
     @objc private func clipViewBoundsDidChange(_ notification: Notification) {
@@ -261,20 +311,20 @@ final class CodeEditorContainerNSView: NSView {
 
         currentPalette = state.palette
         currentLanguage = state.language
+        layer?.backgroundColor = state.palette.editorBackgroundNS.cgColor
 
         textView.tabWidth = prefs.tabWidth
         textView.useSpacesForTabs = prefs.useSpacesForTabs
         textView.activeLanguage = state.language
         textView.activeLineColor = state.palette.activeLineNS
 
-        // Gutter & Minimap visibility
         let targetGutterWidth: CGFloat = prefs.showLineNumbers ? computeGutterWidth(for: state.text) : 0
         if gutterWidthConstraint.constant != targetGutterWidth {
             gutterWidthConstraint.constant = targetGutterWidth
             gutterView.isHidden = !prefs.showLineNumbers
         }
 
-        let targetMinimapWidth: CGFloat = prefs.showMinimap ? 78 : 0
+        let targetMinimapWidth: CGFloat = prefs.showMinimap ? 76 : 0
         if minimapWidthConstraint.constant != targetMinimapWidth {
             minimapWidthConstraint.constant = targetMinimapWidth
             minimapView.isHidden = !prefs.showMinimap
@@ -287,11 +337,13 @@ final class CodeEditorContainerNSView: NSView {
             italicFont = SyntaxHighlighter.resolveMonoFont(family: prefs.fontFamily, size: sz, weight: .regular, italic: true)
             currentParagraphStyle = NSMutableParagraphStyle()
             currentParagraphStyle.lineSpacing = 3.0
-            gutterView.font = SyntaxHighlighter.resolveMonoFont(family: prefs.fontFamily, size: max(10, sz - 2.0), weight: .regular, italic: false)
+            gutterView.font = SyntaxHighlighter.resolveMonoFont(family: prefs.fontFamily, size: max(10.5, sz - 2.0), weight: .regular, italic: false)
             coordinator.lastFontKey = fontKey
         }
 
         if wrapChanged {
+            isWordWrapActive = prefs.wordWrap
+            lastSyncedContentWidth = 0
             applyWordWrap(prefs.wordWrap)
             coordinator.lastWordWrap = prefs.wordWrap
         }
@@ -309,7 +361,9 @@ final class CodeEditorContainerNSView: NSView {
                 .paragraphStyle: currentParagraphStyle
             ]
             gutterView.palette = state.palette
+            gutterView.needsDisplay = true
             minimapView.palette = state.palette
+            minimapView.needsDisplay = true
             coordinator.lastPalette = state.palette
         }
 
@@ -332,13 +386,23 @@ final class CodeEditorContainerNSView: NSView {
             if !textView.hasMarkedText() {
                 reapplySyntaxHighlighting()
             }
+            let wasFirstTabAttach = (coordinator.lastTabID == nil)
             coordinator.lastTabID = state.tabID
             coordinator.lastLanguage = state.language
+            syncTextViewWidthToScrollViewIfNeeded()
             refreshGutterAndMinimap()
             coordinator.reportCursorTelemetry(from: textView)
+
+            if tabChanged || wasFirstTabAttach {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let win = self.window else { return }
+                    if win.firstResponder === win || win.firstResponder == nil {
+                        win.makeFirstResponder(self.textView)
+                    }
+                }
+            }
         }
 
-        // Execute one-shot editor action commands (Comment toggle, Goto line, Find/Replace...)
         if let pending = state.pendingCommand, pending.id != coordinator.lastHandledCommandID {
             coordinator.lastHandledCommandID = pending.id
             textView.performEditorCommand(pending.cmd)
@@ -347,11 +411,15 @@ final class CodeEditorContainerNSView: NSView {
 
     private func applyWordWrap(_ wrap: Bool) {
         scrollView.hasHorizontalScroller = !wrap
+        let contentW = max(240, scrollView.contentSize.width)
         if wrap {
             textContainerRef.widthTracksTextView = true
-            textContainerRef.containerSize = NSSize(width: max(200, scrollView.contentSize.width), height: .greatestFiniteMagnitude)
+            textContainerRef.containerSize = NSSize(width: contentW, height: .greatestFiniteMagnitude)
             textView.isHorizontallyResizable = false
             textView.autoresizingMask = [.width]
+            var f = textView.frame
+            f.size.width = contentW
+            textView.frame = f
         } else {
             textContainerRef.widthTracksTextView = false
             textContainerRef.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
@@ -359,6 +427,7 @@ final class CodeEditorContainerNSView: NSView {
             textView.autoresizingMask = [.width, .height]
         }
         textView.needsLayout = true
+        textView.needsDisplay = true
     }
 
     private func computeGutterWidth(for text: String) -> CGFloat {
@@ -386,6 +455,7 @@ final class CodeEditorContainerNSView: NSView {
             .paragraphStyle: currentParagraphStyle
         ]
         coordinator?.isProgrammaticUpdate = wasProg
+        textView.needsDisplay = true
         minimapView.updateSnapshot(from: textStorageRef, palette: currentPalette)
     }
 
@@ -421,7 +491,9 @@ final class CodeTextView: NSTextView {
     }
 
     override func drawBackground(in rect: NSRect) {
-        super.drawBackground(in: rect)
+        let clipped = rect.intersection(bounds)
+        guard !clipped.isEmpty else { return }
+        super.drawBackground(in: clipped)
 
         // Draw subtle active cursor line highlight across full editor width
         guard let lm = layoutManager, let tc = textContainer else { return }
@@ -449,19 +521,18 @@ final class CodeTextView: NSTextView {
             lineRect = NSRect(x: 0, y: origin.y + frag.minY - 1, width: bounds.width, height: max(18, frag.height + 2))
         }
 
-        if lineRect.intersects(rect) {
+        let targetFill = lineRect.intersection(clipped)
+        if !targetFill.isEmpty {
             activeLineColor.setFill()
-            lineRect.fill()
+            targetFill.fill()
         }
     }
 
-    // Paste always inserts clean plain code & flags instant language detection!
     override func paste(_ sender: Any?) {
         didJustPasteFlag = true
         super.pasteAsPlainText(sender)
     }
 
-    // Smart Auto-Indent on Return/Enter
     override func insertNewline(_ sender: Any?) {
         if hasMarkedText() {
             super.insertNewline(sender)
@@ -497,7 +568,6 @@ final class CodeTextView: NSTextView {
         insertText("\n\(leadingWhitespace)\(extra)", replacementRange: sel)
     }
 
-    // Smart Tab & Multi-line Block Indent
     override func insertTab(_ sender: Any?) {
         if hasMarkedText() {
             super.insertTab(sender)
@@ -516,7 +586,6 @@ final class CodeTextView: NSTextView {
         indentSelectedLines(outdent: true)
     }
 
-    // Auto-pair opening brackets when typing code
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         if !hasMarkedText(),
            let str = insertString as? String,
@@ -540,7 +609,6 @@ final class CodeTextView: NSTextView {
         "(": ")"
     ]
 
-    // Drag & Drop support for opening code/markdown files
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let pb = sender.draggingPasteboard
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
@@ -776,14 +844,18 @@ final class CodeLineNumberGutterView: NSView {
     var font: NSFont = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
 
     override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
-        palette.gutterBackgroundNS.setFill()
-        dirtyRect.fill()
+        let safeRect = dirtyRect.intersection(bounds)
+        guard !safeRect.isEmpty else { return }
 
-        // Subtle separator hairline
+        palette.gutterBackgroundNS.setFill()
+        safeRect.fill()
+
+        // Subtle separator hairline strictly within bounds
         palette.gutterTextNS.withAlphaComponent(0.18).setFill()
-        NSRect(x: bounds.maxX - 1, y: dirtyRect.minY, width: 1, height: dirtyRect.height).fill()
+        NSRect(x: bounds.maxX - 1, y: safeRect.minY, width: 1, height: safeRect.height).fill()
 
         guard let tv = textView,
               let lm = layoutManager,
@@ -814,7 +886,6 @@ final class CodeLineNumberGutterView: NSView {
         let visibleGlyphRange = lm.glyphRange(forBoundingRect: visRect, in: tc)
         let firstVisibleChar = lm.characterIndexForGlyph(at: visibleGlyphRange.location)
 
-        // Count logical line number up to firstVisibleChar
         var lineNumber = 1
         var scanIdx = 0
         while scanIdx < firstVisibleChar && scanIdx < ns.length {
@@ -846,12 +917,11 @@ final class CodeLineNumberGutterView: NSView {
             glyphIdx = NSMaxRange(lineGlyphRange)
         }
 
-        // Trailing empty newline at end of document
         if ns.character(at: ns.length - 1) == 10 {
             let extraRect = lm.extraLineFragmentRect
             if extraRect.height > 0 {
                 let y = extraRect.minY + origin.y - visRect.minY
-                if y >= -20 && y <= bounds.height + 20 {
+                if y >= 0 && y <= bounds.height {
                     let isCursorOnTrailing = (activeCharIndex == ns.length)
                     let attrs = isCursorOnTrailing ? activeAttrs : normalAttrs
                     let label = "\(lineNumber)" as NSString
@@ -880,6 +950,7 @@ final class SublimeMinimapView: NSView {
     private var miniLines: [[MiniLineSegment]] = []
 
     override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
 
     func updateSnapshot(from storage: NSTextStorage, palette: EditorThemePalette) {
         self.palette = palette
@@ -926,7 +997,7 @@ final class SublimeMinimapView: NSView {
                 segments.append(MiniLineSegment(
                     indent: CGFloat(segStart) * 0.68,
                     width: max(1.5, CGFloat(segLen) * 0.68),
-                    color: attrColor.withAlphaComponent(0.72)
+                    color: attrColor.withAlphaComponent(0.75)
                 ))
             }
             built.append(segments)
@@ -938,11 +1009,18 @@ final class SublimeMinimapView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        palette.chromeBackgroundNS.withAlphaComponent(0.95).setFill()
-        dirtyRect.fill()
+        // Strictly clamp drawing inside self.bounds so macOS 14+ non-clipped dirtyRect never bleeds over siblings!
+        let safeRect = dirtyRect.intersection(bounds)
+        guard !safeRect.isEmpty else { return }
 
-        palette.gutterTextNS.withAlphaComponent(0.16).setFill()
-        NSRect(x: 0, y: dirtyRect.minY, width: 1, height: dirtyRect.height).fill()
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: bounds).addClip()
+
+        palette.chromeBackgroundNS.setFill()
+        safeRect.fill()
+
+        palette.gutterTextNS.withAlphaComponent(0.20).setFill()
+        NSRect(x: 0, y: 0, width: 1, height: bounds.height).fill()
 
         let rowPitch: CGFloat = 2.8
         let totalRenderedHeight = CGFloat(miniLines.count) * rowPitch + 12
@@ -952,7 +1030,7 @@ final class SublimeMinimapView: NSView {
 
         for (rowIdx, segs) in miniLines.enumerated() {
             let y = 8 + CGFloat(rowIdx) * rowPitch - scrollOffset
-            if y < -4 || y > bounds.height + 4 { continue }
+            if y < 0 || y > bounds.height - 2 { continue }
             for seg in segs {
                 let x = 6 + seg.indent
                 guard x < bounds.width - 4 else { break }
@@ -962,15 +1040,16 @@ final class SublimeMinimapView: NSView {
             }
         }
 
-        // Viewport highlight lens
         let effectiveTrack = min(bounds.height, max(36, totalRenderedHeight))
         let lensHeight = max(24, min(bounds.height, viewportHeightFraction * effectiveTrack))
         let lensY = min(bounds.height - lensHeight, max(0, viewportStartFraction * (effectiveTrack - lensHeight)))
         let lensRect = NSRect(x: 1, y: lensY, width: bounds.width - 2, height: lensHeight)
         NSColor.white.withAlphaComponent(palette.isDark ? 0.10 : 0.35).setFill()
         lensRect.fill()
-        palette.gutterTextNS.withAlphaComponent(0.28).setStroke()
+        palette.gutterTextNS.withAlphaComponent(0.30).setStroke()
         NSBezierPath(rect: lensRect.insetBy(dx: 0.5, dy: 0.5)).stroke()
+
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     override func mouseDown(with event: NSEvent) {

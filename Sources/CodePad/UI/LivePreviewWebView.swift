@@ -16,35 +16,40 @@ struct LivePreviewPaneView: View {
     var body: some View {
         let palette = store.effectivePalette
         VStack(spacing: 0) {
-            // Sleek Preview Header Toolbar
-            HStack(spacing: 10) {
-                HStack(spacing: 6) {
+            // Single-row compact Preview Header Bar (never wraps vertically!)
+            HStack(spacing: 8) {
+                HStack(spacing: 5) {
                     Circle()
                         .fill(Color.green)
                         .frame(width: 7, height: 7)
-                    Text("XEM TRƯỚC TRỰC TIẾP")
-                        .font(.system(size: 11, weight: .bold))
-                        .tracking(0.4)
-                        .foregroundStyle(palette.plainTextColor.opacity(0.88))
+                    Text("Xem trước")
+                        .font(.system(size: 11.5, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundStyle(palette.plainTextColor.opacity(0.9))
 
                     if let tab = store.activeTab {
-                        Text("• \(tab.language.displayName)")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(palette.plainTextColor.opacity(0.58))
+                        Text("• \(tab.language.shortBadge)")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .foregroundStyle(tab.language.accentColor)
                     }
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 Button {
                     store.forceLightPaperPreview.toggle()
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: store.forceLightPaperPreview ? "sun.max.fill" : "circle.lefthalf.filled")
-                        Text(store.forceLightPaperPreview ? "Nền giấy sáng" : "Theo Theme")
+                        Text(store.forceLightPaperPreview ? "Giấy sáng" : "Theme")
+                            .lineLimit(1)
                     }
                     .font(.system(size: 11, weight: .medium))
-                    .padding(.horizontal, 8)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 7)
                     .padding(.vertical, 3.5)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
@@ -59,11 +64,16 @@ struct LivePreviewPaneView: View {
                     Button {
                         ExportService.shared.promptAndExport(tab: tab, format: .pdf, preferences: store.preferences)
                     } label: {
-                        Label("PDF", systemImage: "doc.richtext")
-                            .font(.system(size: 11, weight: .semibold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3.5)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.16)))
+                        HStack(spacing: 3) {
+                            Image(systemName: "doc.richtext")
+                            Text("PDF")
+                                .lineLimit(1)
+                        }
+                        .font(.system(size: 11, weight: .semibold))
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3.5)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.16)))
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.accentColor)
@@ -72,11 +82,16 @@ struct LivePreviewPaneView: View {
                     Button {
                         ExportService.shared.promptAndExport(tab: tab, format: .docx, preferences: store.preferences)
                     } label: {
-                        Label("DOCX", systemImage: "doc.text")
-                            .font(.system(size: 11, weight: .semibold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3.5)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.blue.opacity(0.16)))
+                        HStack(spacing: 3) {
+                            Image(systemName: "doc.text")
+                            Text("DOCX")
+                                .lineLimit(1)
+                        }
+                        .font(.system(size: 11, weight: .semibold))
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3.5)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.blue.opacity(0.16)))
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.blue)
@@ -89,10 +104,11 @@ struct LivePreviewPaneView: View {
                     } label: {
                         Image(systemName: "pip.exit")
                             .font(.system(size: 12, weight: .semibold))
-                            .padding(4)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(palette.plainTextColor.opacity(0.75))
+                    .foregroundStyle(palette.plainTextColor.opacity(0.78))
                     .help("Tách Live Preview ra cửa sổ riêng (⌘⇧O)")
 
                     Button {
@@ -100,19 +116,20 @@ struct LivePreviewPaneView: View {
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 11, weight: .semibold))
-                            .padding(4)
+                            .frame(width: 22, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(palette.plainTextColor.opacity(0.7))
+                    .foregroundStyle(palette.plainTextColor.opacity(0.72))
                     .help("Ẩn khung Xem trước cạnh bên (⌘⌥P)")
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 10)
+            .frame(height: 34)
             .background(palette.chromeBackgroundColor)
 
             Divider()
-                .overlay(Color.primary.opacity(0.12))
+                .overlay(Color.primary.opacity(0.14))
 
             if let tab = store.activeTab {
                 LivePreviewWebRepresentable(
@@ -123,10 +140,13 @@ struct LivePreviewPaneView: View {
                     palette: previewPalette,
                     scrollFraction: store.preferences.syncPreviewScroll ? store.editorScrollFraction : nil
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Spacer()
             }
         }
+        .background(previewPalette.editorBackgroundColor)
+        .clipped()
     }
 }
 
@@ -134,10 +154,12 @@ struct FloatingPreviewWindowRootView: View {
     @ObservedObject var store = WorkspaceStore.shared
 
     var body: some View {
-        LivePreviewPaneView(isStandaloneWindow: true)
-            .padding(.top, 28)
-            .background(store.effectivePalette.chromeBackgroundColor)
-            .ignoresSafeArea(.container, edges: .top)
+        ZStack {
+            store.effectivePalette.chromeBackgroundColor
+                .ignoresSafeArea()
+            LivePreviewPaneView(isStandaloneWindow: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 }
 
@@ -158,9 +180,10 @@ private struct LivePreviewWebRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
-        let wv = WKWebView(frame: .zero, configuration: config)
+        let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 480), configuration: config)
+        wv.wantsLayer = true
+        wv.clipsToBounds = true
         wv.navigationDelegate = context.coordinator
-        wv.setValue(false, forKey: "drawsBackground")
         context.coordinator.webView = wv
         return wv
     }
@@ -194,6 +217,10 @@ private struct LivePreviewWebRepresentable: NSViewRepresentable {
             pendingBaseURL = baseURL
 
             debounceItem?.cancel()
+            if lastLoadedHTML.isEmpty {
+                commitPendingHTML()
+                return
+            }
             let item = DispatchWorkItem { [weak self] in
                 Task { @MainActor in
                     self?.commitPendingHTML()

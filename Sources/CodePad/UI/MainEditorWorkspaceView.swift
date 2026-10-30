@@ -9,45 +9,55 @@ struct MainEditorWorkspaceView: View {
         let palette = store.effectivePalette
 
         ZStack {
+            // Paint seamless Sublime background color all the way under the macOS Titlebar / Traffic Lights,
+            // while keeping interactive controls strictly inside safeArea so NSTitlebarContainerView never blocks clicks!
+            palette.chromeBackgroundColor
+                .ignoresSafeArea()
+
             VStack(spacing: 0) {
                 if !store.isZenMode {
                     topSublimeHeaderBar(palette: palette)
                 }
 
                 GeometryReader { geo in
+                    let sidebarW: CGFloat = (store.preferences.showSidebar && !store.isZenMode) ? 215 : 0
+                    let contentTotalW = max(320, geo.size.width - sidebarW - (sidebarW > 0 ? 1 : 0))
+
                     HStack(spacing: 0) {
-                        if store.preferences.showSidebar && !store.isZenMode {
+                        if sidebarW > 0 {
                             leftScratchpadSidebar(palette: palette)
-                                .frame(width: 215)
+                                .frame(width: sidebarW)
                             Divider().overlay(Color.primary.opacity(0.14))
                         }
 
-                        let remainingWidth = max(320, geo.size.width - ((store.preferences.showSidebar && !store.isZenMode) ? 216 : 0))
-
                         if store.isSplitPreviewVisible {
-                            let previewW = max(280, min(remainingWidth - 280, remainingWidth * store.previewWidthRatio))
-                            let editorW = max(280, remainingWidth - previewW - 5)
+                            let minPane: CGFloat = min(280, contentTotalW * 0.35)
+                            let previewW = max(minPane, min(contentTotalW - minPane - 8, contentTotalW * store.previewWidthRatio))
+                            let editorW = max(minPane, contentTotalW - previewW - 8)
 
                             editorColumn(palette: palette)
-                                .frame(width: editorW)
+                                .frame(width: editorW, height: geo.size.height)
 
-                            resizableSplitDivider(totalWidth: remainingWidth, palette: palette)
+                            resizableSplitDivider(sidebarOffset: sidebarW, totalWidth: contentTotalW, palette: palette)
+                                .frame(height: geo.size.height)
 
                             LivePreviewPaneView(isStandaloneWindow: false)
-                                .frame(width: previewW)
+                                .frame(width: previewW, height: geo.size.height)
                         } else {
                             editorColumn(palette: palette)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .frame(width: contentTotalW, height: geo.size.height)
                         }
                     }
+                    .coordinateSpace(name: "SplitWorkspace")
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(palette.editorBackgroundColor)
 
                 if store.preferences.showStatusBar && !store.isZenMode {
                     bottomSublimeStatusBar(palette: palette)
                 }
             }
-            .background(palette.editorBackgroundColor)
-            .preferredColorScheme(palette.isDark ? .dark : .light)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if store.isCommandPalettePresented {
                 CommandPaletteOverlayView()
@@ -74,7 +84,8 @@ struct MainEditorWorkspaceView: View {
                 .zIndex(30)
             }
         }
-        .ignoresSafeArea(.container, edges: .top)
+        .frame(minWidth: 760, minHeight: 480)
+        .preferredColorScheme(palette.isDark ? .dark : .light)
         .sheet(isPresented: $store.isExportSheetPresented) {
             ExportCenterSheetView()
         }
@@ -83,15 +94,11 @@ struct MainEditorWorkspaceView: View {
         }
     }
 
-    // MARK: - Top Sublime Tab Bar + Unified macOS Controls
+    // MARK: - Top Sublime Tab Bar + Action Controls (100% Clickable Below Titlebar)
 
     @ViewBuilder
     private func topSublimeHeaderBar(palette: EditorThemePalette) -> some View {
         HStack(spacing: 6) {
-            // Leading clearance for native macOS traffic lights (Close / Minimize / Zoom)
-            Spacer()
-                .frame(width: 72)
-
             Button {
                 withAnimation(.easeInOut(duration: 0.16)) {
                     store.preferences.showSidebar.toggle()
@@ -99,15 +106,16 @@ struct MainEditorWorkspaceView: View {
             } label: {
                 Image(systemName: "sidebar.left")
                     .font(.system(size: 13, weight: .medium))
-                    .frame(width: 26, height: 24)
+                    .frame(width: 28, height: 26)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(palette.plainTextColor.opacity(0.75))
+            .foregroundStyle(palette.plainTextColor.opacity(0.8))
             .help("Ẩn / Hiện Thanh bên danh sách tệp (⌘\\)")
 
             // Scrollable Sublime-inspired Tabs
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
                     ForEach(store.tabs) { tab in
                         let isActive = (tab.id == store.activeTabID)
                         sublimeTabPill(tab: tab, isActive: isActive, palette: palette)
@@ -115,17 +123,19 @@ struct MainEditorWorkspaceView: View {
                 }
                 .padding(.vertical, 4)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Button {
                 store.createNewTab()
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 12.5, weight: .semibold))
-                    .frame(width: 24, height: 24)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.07)))
+                    .frame(width: 26, height: 26)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.08)))
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(palette.plainTextColor.opacity(0.85))
+            .foregroundStyle(palette.plainTextColor.opacity(0.9))
             .help("Tạo Tab mới (⌘N)")
 
             Button {
@@ -136,13 +146,16 @@ struct MainEditorWorkspaceView: View {
                         .font(.system(size: 11.5, weight: .semibold))
                     Text("Dán mới")
                         .font(.system(size: 11.5, weight: .medium))
+                        .lineLimit(1)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4.5)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.08)))
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(palette.plainTextColor.opacity(0.88))
+            .foregroundStyle(palette.plainTextColor.opacity(0.9))
             .help("Dán Clipboard thành Tab mới & tự động nhận diện ngôn ngữ (⌘⇧V)")
 
             Divider()
@@ -150,7 +163,7 @@ struct MainEditorWorkspaceView: View {
                 .padding(.horizontal, 2)
 
             // Live Preview Split + Popout Window Controls
-            HStack(spacing: 2) {
+            HStack(spacing: 4) {
                 Button {
                     store.toggleSplitPreview()
                 } label: {
@@ -159,14 +172,17 @@ struct MainEditorWorkspaceView: View {
                             .font(.system(size: 11.5, weight: .semibold))
                         Text("Preview")
                             .font(.system(size: 11.5, weight: .semibold))
+                            .lineLimit(1)
                     }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4.5)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
                             .fill(store.isSplitPreviewVisible ? Color.accentColor : Color.primary.opacity(0.08))
                     )
-                    .foregroundStyle(store.isSplitPreviewVisible ? .white : palette.plainTextColor.opacity(0.88))
+                    .foregroundStyle(store.isSplitPreviewVisible ? .white : palette.plainTextColor.opacity(0.9))
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Bật / Tắt khung Xem trước trực tiếp cạnh bên cho Markdown, HTML, SVG, JSON, CSV (⌘⌥P)")
@@ -176,11 +192,12 @@ struct MainEditorWorkspaceView: View {
                 } label: {
                     Image(systemName: "pip.exit")
                         .font(.system(size: 11.5, weight: .semibold))
-                        .frame(width: 25, height: 25)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.07)))
+                        .frame(width: 26, height: 26)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.08)))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(palette.plainTextColor.opacity(0.80))
+                .foregroundStyle(palette.plainTextColor.opacity(0.84))
                 .help("Mở Cửa sổ Xem trước riêng biệt (⌘⇧O)")
             }
 
@@ -255,11 +272,13 @@ struct MainEditorWorkspaceView: View {
                         .font(.system(size: 11.5, weight: .semibold))
                     Text("Xuất PDF/DOCX")
                         .font(.system(size: 11.5, weight: .semibold))
+                        .lineLimit(1)
                 }
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 9)
-                .padding(.vertical, 4.5)
+                .padding(.vertical, 5)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.09)))
-                .foregroundStyle(palette.plainTextColor.opacity(0.92))
+                .foregroundStyle(palette.plainTextColor.opacity(0.94))
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
@@ -270,10 +289,11 @@ struct MainEditorWorkspaceView: View {
             } label: {
                 Image(systemName: "command")
                     .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 25, height: 25)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(palette.plainTextColor.opacity(0.78))
+            .foregroundStyle(palette.plainTextColor.opacity(0.82))
             .help("Mở Bảng lệnh Sublime Command Palette (⌘⇧P)")
 
             Button {
@@ -281,13 +301,14 @@ struct MainEditorWorkspaceView: View {
             } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 12.5, weight: .medium))
-                    .frame(width: 25, height: 25)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(palette.plainTextColor.opacity(0.78))
+            .foregroundStyle(palette.plainTextColor.opacity(0.82))
             .help("Cài đặt CodePad (⌘,)")
         }
-        .padding(.trailing, 10)
+        .padding(.horizontal, 10)
         .frame(height: 38)
         .background(palette.chromeBackgroundColor)
         .overlay(alignment: .bottom) {
@@ -324,8 +345,8 @@ struct MainEditorWorkspaceView: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(palette.plainTextColor.opacity(0.5))
-                    .frame(width: 15, height: 15)
+                    .foregroundStyle(palette.plainTextColor.opacity(0.55))
+                    .frame(width: 16, height: 16)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -335,11 +356,11 @@ struct MainEditorWorkspaceView: View {
         .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isActive ? palette.editorBackgroundColor : Color.primary.opacity(0.03))
+                .fill(isActive ? palette.editorBackgroundColor : Color.primary.opacity(0.04))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(isActive ? palette.accentColor.opacity(0.55) : Color.clear, lineWidth: 1)
+                .strokeBorder(isActive ? palette.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture {
@@ -381,36 +402,43 @@ struct MainEditorWorkspaceView: View {
                         store.openFileURL(fileURL)
                     }
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .background(palette.editorBackgroundColor)
+        .clipped()
     }
 
     @ViewBuilder
-    private func resizableSplitDivider(totalWidth: CGFloat, palette: EditorThemePalette) -> some View {
-        Rectangle()
-            .fill(palette.chromeBackgroundColor)
-            .frame(width: 5)
-            .overlay(
-                Capsule()
-                    .fill(palette.plainTextColor.opacity(0.22))
-                    .frame(width: 1.5, height: 28)
-            )
-            .onHover { hovering in
-                if hovering {
-                    NSCursor.resizeLeftRight.push()
-                } else {
-                    NSCursor.pop()
-                }
+    private func resizableSplitDivider(sidebarOffset: CGFloat, totalWidth: CGFloat, palette: EditorThemePalette) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(palette.chromeBackgroundColor)
+            Rectangle()
+                .fill(Color.primary.opacity(0.14))
+                .frame(width: 1)
+            Capsule()
+                .fill(palette.plainTextColor.opacity(0.32))
+                .frame(width: 3, height: 32)
+        }
+        .frame(width: 8)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
             }
-            .gesture(
-                DragGesture()
-                    .onChanged { value in
-                        let currentPreviewW = totalWidth * store.previewWidthRatio
-                        let proposedPreviewW = currentPreviewW - value.translation.width
-                        let clampedRatio = min(0.72, max(0.25, proposedPreviewW / max(1, totalWidth)))
-                        store.previewWidthRatio = clampedRatio
-                    }
-            )
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1, coordinateSpace: .named("SplitWorkspace"))
+                .onChanged { value in
+                    let localX = value.location.x - sidebarOffset
+                    let proposedPreviewW = totalWidth - localX
+                    let ratio = proposedPreviewW / max(320, totalWidth)
+                    store.previewWidthRatio = min(0.70, max(0.26, ratio))
+                }
+        )
     }
 
     // MARK: - Optional Left Scratchpad & Recent Files Sidebar (Cmd+\)
@@ -503,7 +531,6 @@ struct MainEditorWorkspaceView: View {
 
             Divider().overlay(Color.primary.opacity(0.14))
 
-            // Sidebar GitHub Self-Update Button
             VStack(spacing: 6) {
                 Button {
                     if updater.availableUpdateInfo != nil {
@@ -517,6 +544,7 @@ struct MainEditorWorkspaceView: View {
                             .foregroundStyle(updater.availableUpdateInfo != nil ? .green : Color.accentColor)
                         Text(updater.availableUpdateInfo.map { "Cập nhật v\($0.version)" } ?? "Kiểm tra Update (GitHub)")
                             .font(.system(size: 11.5, weight: .semibold))
+                            .lineLimit(1)
                         Spacer()
                     }
                     .padding(.horizontal, 10)
@@ -531,16 +559,18 @@ struct MainEditorWorkspaceView: View {
         .background(palette.chromeBackgroundColor)
     }
 
-    // MARK: - Sublime Bottom Status Bar (With Auto-Language Picker & GitHub Update Button)
+    // MARK: - Sublime Bottom Status Bar
 
     @ViewBuilder
     private func bottomSublimeStatusBar(palette: EditorThemePalette) -> some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             Button {
                 store.isGotoLinePresented = true
             } label: {
                 Text("Dòng \(store.activeCursorLine), Cột \(store.activeCursorColumn)")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .buttonStyle(.plain)
             .help("Bấm để nhảy nhanh tới dòng bất kỳ (⌃G)")
@@ -549,31 +579,33 @@ struct MainEditorWorkspaceView: View {
                 if store.selectedCharCount > 0 {
                     Text("Đã chọn \(store.selectedCharCount) ký tự")
                         .font(.system(size: 11))
+                        .lineLimit(1)
                         .foregroundStyle(palette.accentColor)
                 } else {
                     Text("\(tab.lineCount) dòng • \(tab.wordCount) từ • \(tab.characterCount) ký tự")
                         .font(.system(size: 11))
+                        .lineLimit(1)
                         .opacity(0.75)
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            // Minimap quick toggle
             Button {
                 store.preferences.showMinimap.toggle()
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "sidebar.trailing")
                     Text("Minimap")
+                        .lineLimit(1)
                 }
                 .font(.system(size: 11))
+                .fixedSize(horizontal: true, vertical: false)
                 .opacity(store.preferences.showMinimap ? 0.95 : 0.5)
             }
             .buttonStyle(.plain)
             .help("Bật / Tắt thanh Minimap kiểu Sublime Text (⌘⌥M)")
 
-            // Tab Size Menu
             Menu {
                 ForEach([2, 4, 8], id: \.self) { w in
                     Button("Độ rộng Tab: \(w) Spaces") {
@@ -585,11 +617,11 @@ struct MainEditorWorkspaceView: View {
             } label: {
                 Text("Spaces: \(store.preferences.tabWidth)")
                     .font(.system(size: 11))
+                    .lineLimit(1)
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
 
-            // Theme Quick Menu
             Menu {
                 Toggle("Tự động Sáng / Tối theo macOS", isOn: $store.preferences.followSystemAppearance)
                 Divider()
@@ -610,13 +642,13 @@ struct MainEditorWorkspaceView: View {
                 HStack(spacing: 4) {
                     Image(systemName: palette.isDark ? "moon.stars" : "sun.max")
                     Text(store.preferences.followSystemAppearance ? "Auto macOS" : store.preferences.themeID.palette.id.displayName.components(separatedBy: " (").first ?? "Theme")
+                        .lineLimit(1)
                 }
                 .font(.system(size: 11))
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
 
-            // Language Auto-Detect / Manual Syntax Picker (Sublime bottom-right corner!)
             if let tab = store.activeTab {
                 Menu {
                     Button {
@@ -643,11 +675,13 @@ struct MainEditorWorkspaceView: View {
                                 .foregroundStyle(palette.accentColor)
                             Text("Tự động: \(tab.language.displayName)")
                                 .font(.system(size: 11, weight: .semibold))
+                                .lineLimit(1)
                         } else {
                             Image(systemName: tab.language.sfSymbol)
                                 .font(.system(size: 10))
                             Text(tab.language.displayName)
                                 .font(.system(size: 11, weight: .semibold))
+                                .lineLimit(1)
                         }
                     }
                 }
@@ -656,7 +690,6 @@ struct MainEditorWorkspaceView: View {
                 .help("Ngôn ngữ tô màu cú pháp — Bấm để chọn ngôn ngữ hoặc bật Tự động nhận diện")
             }
 
-            // Prominent GitHub Update Action Button right in Status Bar
             Button {
                 if updater.availableUpdateInfo != nil {
                     updater.showUpdatePromptDialog = true
@@ -674,14 +707,17 @@ struct MainEditorWorkspaceView: View {
                         Text("Cập nhật v\(info.version)")
                             .fontWeight(.bold)
                             .foregroundStyle(.green)
+                            .lineLimit(1)
                     } else {
                         Image(systemName: "arrow.triangle.2.circlepath")
-                        Text("Cập nhật GitHub (v\(updater.currentVersion))")
+                        Text("GitHub v\(updater.currentVersion)")
+                            .lineLimit(1)
                     }
                 }
                 .font(.system(size: 11, weight: .medium))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 2)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2.5)
                 .background(
                     Capsule()
                         .fill(updater.availableUpdateInfo != nil ? Color.green.opacity(0.18) : Color.primary.opacity(0.08))
@@ -690,9 +726,9 @@ struct MainEditorWorkspaceView: View {
             .buttonStyle(.plain)
             .help("Kiểm tra và cập nhật tự động phiên bản mới từ GitHub (hungmtuci/CodePad — ⌘U)")
         }
-        .foregroundStyle(palette.plainTextColor.opacity(0.84))
+        .foregroundStyle(palette.plainTextColor.opacity(0.86))
         .padding(.horizontal, 12)
-        .frame(height: 26)
+        .frame(height: 27)
         .background(palette.chromeBackgroundColor)
         .overlay(alignment: .top) {
             Divider().overlay(Color.primary.opacity(0.16))
