@@ -17,6 +17,30 @@ enum EditorActionCommand: Equatable {
 }
 
 @MainActor
+final class EditorTelemetryStore: ObservableObject {
+    static let shared = EditorTelemetryStore()
+
+    @Published var cursorLine: Int = 1
+    @Published var cursorColumn: Int = 1
+    @Published var selectedCharCount: Int = 0
+    @Published var scrollFraction: Double = 0.0
+
+    private init() {}
+
+    func updateCursor(line: Int, column: Int, selectedCount: Int) {
+        if cursorLine != line { cursorLine = line }
+        if cursorColumn != column { cursorColumn = column }
+        if selectedCharCount != selectedCount { selectedCharCount = selectedCount }
+    }
+
+    func updateScroll(fraction: Double) {
+        if abs(scrollFraction - fraction) > 0.004 {
+            scrollFraction = fraction
+        }
+    }
+}
+
+@MainActor
 final class WorkspaceStore: ObservableObject {
     static let shared = WorkspaceStore()
 
@@ -24,7 +48,9 @@ final class WorkspaceStore: ObservableObject {
     @Published var activeTabID: UUID?
     @Published var preferences: EditorPreferences = EditorPreferences() {
         didSet {
-            scheduleAutosave()
+            if preferences != oldValue {
+                scheduleAutosave()
+            }
         }
     }
 
@@ -39,12 +65,6 @@ final class WorkspaceStore: ObservableObject {
     @Published var isExportSheetPresented: Bool = false
     @Published var isZenMode: Bool = false
     @Published var systemIsDark: Bool = true
-
-    // Cursor & Scroll Sync Telemetry
-    @Published var activeCursorLine: Int = 1
-    @Published var activeCursorColumn: Int = 1
-    @Published var selectedCharCount: Int = 0
-    @Published var editorScrollFraction: Double = 0.0
 
     // Find & Replace Queries & Transient UI State
     @Published var findQuery: String = ""
@@ -70,6 +90,7 @@ final class WorkspaceStore: ObservableObject {
     private var detectWorkItem: DispatchWorkItem?
     private var toastWorkItem: DispatchWorkItem?
     private var floatingPreviewWindow: NSWindow?
+    private let persistenceQueue = DispatchQueue(label: "com.hunglx.CodePad.persistence", qos: .utility)
 
     private let storageFileURL: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -78,7 +99,7 @@ final class WorkspaceStore: ObservableObject {
         return dir.appendingPathComponent("workspace_v1.json")
     }()
 
-    private struct PersistedSnapshot: Codable {
+    private struct PersistedSnapshot: Codable, Sendable {
         var tabs: [DocumentTab]
         var activeTabID: UUID?
         var preferences: EditorPreferences
@@ -181,24 +202,41 @@ final class WorkspaceStore: ObservableObject {
         saveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             Task { @MainActor in
-                self?.saveImmediately()
+                self?.saveInBackground()
             }
         }
         saveWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.65, execute: item)
     }
 
-    func saveImmediately() {
-        saveWorkItem?.cancel()
-        let snapshot = PersistedSnapshot(
+    private func makeSnapshot() -> PersistedSnapshot {
+        PersistedSnapshot(
             tabs: tabs,
             activeTabID: activeTabID,
             preferences: preferences,
             isSplitPreviewVisible: isSplitPreviewVisible,
             recentFilePaths: Array(recentFilePaths.prefix(15))
         )
-        if let encoded = try? JSONEncoder().encode(snapshot) {
-            try? encoded.write(to: storageFileURL, options: .atomic)
+    }
+
+    private func saveInBackground() {
+        let snapshot = makeSnapshot()
+        let targetURL = storageFileURL
+        persistenceQueue.async {
+            if let encoded = try? JSONEncoder().encode(snapshot) {
+                try? encoded.write(to: targetURL, options: .atomic)
+            }
+        }
+    }
+
+    func saveImmediately() {
+        saveWorkItem?.cancel()
+        let snapshot = makeSnapshot()
+        let targetURL = storageFileURL
+        persistenceQueue.sync {
+            if let encoded = try? JSONEncoder().encode(snapshot) {
+                try? encoded.write(to: targetURL, options: .atomic)
+            }
         }
     }
 

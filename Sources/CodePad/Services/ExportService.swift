@@ -10,6 +10,18 @@ final class ExportService {
 
     private var activePDFExporter: OffscreenWebPDFExporter?
 
+    private static let cardWallpaperGradient = NSGradient(colors: [
+        NSColor(srgbRed: 0.14, green: 0.18, blue: 0.28, alpha: 1.0),
+        NSColor(srgbRed: 0.25, green: 0.16, blue: 0.34, alpha: 1.0),
+        NSColor(srgbRed: 0.10, green: 0.26, blue: 0.36, alpha: 1.0)
+    ])!
+
+    private static let trafficLightColors: [NSColor] = [
+        NSColor.fromHex("#FF5F56"),
+        NSColor.fromHex("#FFBD2E"),
+        NSColor.fromHex("#27C93F")
+    ]
+
     private init() {}
 
     // MARK: - Interactive Save Panel Export
@@ -314,12 +326,7 @@ final class ExportService {
 
         // Outer macOS wallpaper gradient backdrop
         let fullRect = NSRect(x: 0, y: 0, width: totalWidth, height: totalHeight)
-        let bgGradient = NSGradient(colors: [
-            NSColor(srgbRed: 0.14, green: 0.18, blue: 0.28, alpha: 1.0),
-            NSColor(srgbRed: 0.25, green: 0.16, blue: 0.34, alpha: 1.0),
-            NSColor(srgbRed: 0.10, green: 0.26, blue: 0.36, alpha: 1.0)
-        ])!
-        bgGradient.draw(in: fullRect, angle: -38)
+        Self.cardWallpaperGradient.draw(in: fullRect, angle: -38)
 
         // Window card with soft drop shadow
         let cardRect = NSRect(x: outerMargin, y: outerMargin, width: cardWidth, height: cardHeight)
@@ -341,12 +348,7 @@ final class ExportService {
 
         // macOS traffic lights at top-left of card
         let headerY = cardRect.maxY - 24
-        let trafficColors: [NSColor] = [
-            NSColor.fromHex("#FF5F56"),
-            NSColor.fromHex("#FFBD2E"),
-            NSColor.fromHex("#27C93F")
-        ]
-        for (i, col) in trafficColors.enumerated() {
+        for (i, col) in Self.trafficLightColors.enumerated() {
             let dotRect = NSRect(x: cardRect.minX + 18 + CGFloat(i) * 20, y: headerY - 6, width: 12, height: 12)
             col.setFill()
             NSBezierPath(ovalIn: dotRect).fill()
@@ -390,6 +392,8 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
     private let hostWindow: NSWindow
     private var continuation: CheckedContinuation<Void, Error>?
     private var destinationURL: URL?
+    private var safetyTimeoutItem: DispatchWorkItem?
+    private var hasStartedPrint = false
 
     override init() {
         let rect = NSRect(x: -10_000, y: -10_000, width: 794, height: 1123)
@@ -414,13 +418,23 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
         }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.continuation = cont
+            let timeout = DispatchWorkItem { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.continuation != nil, !self.hasStartedPrint else { return }
+                    self.webView.stopLoading()
+                    self.runPaginatedPrintOrFallback()
+                }
+            }
+            self.safetyTimeoutItem = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.0, execute: timeout)
             self.webView.loadHTMLString(html, baseURL: baseURL)
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        safetyTimeoutItem?.cancel()
         // Brief settle delay so web fonts / inline scripts finish layout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
             self?.runPaginatedPrintOrFallback()
         }
     }
@@ -434,7 +448,8 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
     }
 
     private func runPaginatedPrintOrFallback() {
-        guard let outURL = destinationURL else { return }
+        guard !hasStartedPrint, let outURL = destinationURL else { return }
+        hasStartedPrint = true
 
         let pInfo = NSPrintInfo()
         pInfo.paperSize = NSSize(width: 595.28, height: 841.89) // ISO A4
@@ -492,8 +507,11 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
     }
 
     private func finish(with result: Result<Void, Error>) {
+        safetyTimeoutItem?.cancel()
+        safetyTimeoutItem = nil
         guard let cont = continuation else { return }
         continuation = nil
+        webView.navigationDelegate = nil
         hostWindow.orderOut(nil)
         cont.resume(with: result)
     }

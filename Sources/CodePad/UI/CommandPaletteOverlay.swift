@@ -7,14 +7,33 @@ struct CommandPaletteItem: Identifiable {
     let subtitle: String
     let icon: String
     let shortcutHint: String?
+    let searchHaystack: String
     let action: @MainActor () -> Void
+
+    init(
+        id: String,
+        title: String,
+        subtitle: String,
+        icon: String,
+        shortcutHint: String?,
+        action: @escaping @MainActor () -> Void
+    ) {
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+        self.shortcutHint = shortcutHint
+        self.searchHaystack = "\(title.lowercased()) \(subtitle.lowercased())"
+        self.action = action
+    }
 }
 
 struct CommandPaletteOverlayView: View {
     @ObservedObject var store = WorkspaceStore.shared
     @FocusState private var isSearchFocused: Bool
 
-    private var allItems: [CommandPaletteItem] {
+    @MainActor
+    private static let catalog: [CommandPaletteItem] = {
         var list: [CommandPaletteItem] = [
             CommandPaletteItem(
                 id: "paste-new-tab",
@@ -23,7 +42,7 @@ struct CommandPaletteOverlayView: View {
                 icon: "doc.on.clipboard.fill",
                 shortcutHint: "⌘⇧V"
             ) {
-                store.pasteClipboardIntoNewTab()
+                WorkspaceStore.shared.pasteClipboardIntoNewTab()
             },
             CommandPaletteItem(
                 id: "new-tab",
@@ -32,7 +51,7 @@ struct CommandPaletteOverlayView: View {
                 icon: "plus.square.on.square",
                 shortcutHint: "⌘N"
             ) {
-                store.createNewTab()
+                WorkspaceStore.shared.createNewTab()
             },
             CommandPaletteItem(
                 id: "toggle-preview",
@@ -41,7 +60,7 @@ struct CommandPaletteOverlayView: View {
                 icon: "rectangle.split.2x1",
                 shortcutHint: "⌘⌥P"
             ) {
-                store.toggleSplitPreview()
+                WorkspaceStore.shared.toggleSplitPreview()
             },
             CommandPaletteItem(
                 id: "floating-preview",
@@ -50,7 +69,7 @@ struct CommandPaletteOverlayView: View {
                 icon: "macwindow.on.rectangle",
                 shortcutHint: "⌘⇧O"
             ) {
-                store.openOrFocusFloatingPreviewWindow()
+                WorkspaceStore.shared.openOrFocusFloatingPreviewWindow()
             },
             CommandPaletteItem(
                 id: "export-pdf",
@@ -59,8 +78,9 @@ struct CommandPaletteOverlayView: View {
                 icon: "doc.richtext.fill",
                 shortcutHint: "⌘E"
             ) {
-                if let tab = store.activeTab {
-                    ExportService.shared.promptAndExport(tab: tab, format: .pdf, preferences: store.preferences)
+                let ws = WorkspaceStore.shared
+                if let tab = ws.activeTab {
+                    ExportService.shared.promptAndExport(tab: tab, format: .pdf, preferences: ws.preferences)
                 }
             },
             CommandPaletteItem(
@@ -70,8 +90,9 @@ struct CommandPaletteOverlayView: View {
                 icon: "doc.text.fill",
                 shortcutHint: nil
             ) {
-                if let tab = store.activeTab {
-                    ExportService.shared.promptAndExport(tab: tab, format: .docx, preferences: store.preferences)
+                let ws = WorkspaceStore.shared
+                if let tab = ws.activeTab {
+                    ExportService.shared.promptAndExport(tab: tab, format: .docx, preferences: ws.preferences)
                 }
             },
             CommandPaletteItem(
@@ -81,8 +102,9 @@ struct CommandPaletteOverlayView: View {
                 icon: "safari.fill",
                 shortcutHint: nil
             ) {
-                if let tab = store.activeTab {
-                    ExportService.shared.promptAndExport(tab: tab, format: .html, preferences: store.preferences)
+                let ws = WorkspaceStore.shared
+                if let tab = ws.activeTab {
+                    ExportService.shared.promptAndExport(tab: tab, format: .html, preferences: ws.preferences)
                 }
             },
             CommandPaletteItem(
@@ -92,8 +114,9 @@ struct CommandPaletteOverlayView: View {
                 icon: "photo.artframe",
                 shortcutHint: nil
             ) {
-                if let tab = store.activeTab {
-                    ExportService.shared.promptAndExport(tab: tab, format: .pngCard, preferences: store.preferences)
+                let ws = WorkspaceStore.shared
+                if let tab = ws.activeTab {
+                    ExportService.shared.promptAndExport(tab: tab, format: .pngCard, preferences: ws.preferences)
                 }
             },
             CommandPaletteItem(
@@ -103,8 +126,9 @@ struct CommandPaletteOverlayView: View {
                 icon: "paintbrush.pointed.fill",
                 shortcutHint: "⌘⌥C"
             ) {
-                if let tab = store.activeTab {
-                    ExportService.shared.copyHighlightedRichTextToClipboard(tab: tab, preferences: store.preferences)
+                let ws = WorkspaceStore.shared
+                if let tab = ws.activeTab {
+                    ExportService.shared.copyHighlightedRichTextToClipboard(tab: tab, preferences: ws.preferences)
                 }
             },
             CommandPaletteItem(
@@ -114,7 +138,7 @@ struct CommandPaletteOverlayView: View {
                 icon: "wand.and.stars",
                 shortcutHint: "⌘⇧I"
             ) {
-                store.formatActiveDocument()
+                WorkspaceStore.shared.formatActiveDocument()
             },
             CommandPaletteItem(
                 id: "toggle-minimap",
@@ -123,7 +147,7 @@ struct CommandPaletteOverlayView: View {
                 icon: "sidebar.trailing",
                 shortcutHint: "⌘⌥M"
             ) {
-                store.preferences.showMinimap.toggle()
+                WorkspaceStore.shared.preferences.showMinimap.toggle()
             },
             CommandPaletteItem(
                 id: "toggle-zen",
@@ -133,7 +157,7 @@ struct CommandPaletteOverlayView: View {
                 shortcutHint: "⌃⌘Z"
             ) {
                 withAnimation(.easeInOut(duration: 0.18)) {
-                    store.isZenMode.toggle()
+                    WorkspaceStore.shared.isZenMode.toggle()
                 }
             },
             CommandPaletteItem(
@@ -152,7 +176,7 @@ struct CommandPaletteOverlayView: View {
                 icon: "wand.and.rays",
                 shortcutHint: nil
             ) {
-                store.setLanguageForActiveTab(.plainText, autoDetect: true)
+                WorkspaceStore.shared.setLanguageForActiveTab(.plainText, autoDetect: true)
             }
         ]
 
@@ -164,8 +188,8 @@ struct CommandPaletteOverlayView: View {
                 icon: theme.isDark ? "moon.stars.fill" : "sun.max.fill",
                 shortcutHint: nil
             ) {
-                store.preferences.followSystemAppearance = false
-                store.preferences.themeID = theme
+                WorkspaceStore.shared.preferences.followSystemAppearance = false
+                WorkspaceStore.shared.preferences.themeID = theme
             })
         }
 
@@ -177,20 +201,19 @@ struct CommandPaletteOverlayView: View {
                 icon: lang.sfSymbol,
                 shortcutHint: nil
             ) {
-                store.setLanguageForActiveTab(lang, autoDetect: false)
+                WorkspaceStore.shared.setLanguageForActiveTab(lang, autoDetect: false)
             })
         }
 
         return list
-    }
+    }()
 
     private var filteredItems: [CommandPaletteItem] {
         let q = store.commandPaletteQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return Array(allItems.prefix(18)) }
-        let terms = q.split(separator: " ").map(String.init)
-        return allItems.filter { item in
-            let hay = "\(item.title.lowercased()) \(item.subtitle.lowercased())"
-            return terms.allSatisfy { hay.contains($0) }
+        guard !q.isEmpty else { return Array(Self.catalog.prefix(18)) }
+        let terms = q.split(separator: " ")
+        return Self.catalog.filter { item in
+            terms.allSatisfy { item.searchHaystack.contains($0) }
         }
     }
 
@@ -391,7 +414,7 @@ struct GotoLineOverlayView: View {
             }
         }
         .onAppear {
-            store.gotoLineInput = "\(store.activeCursorLine)"
+            store.gotoLineInput = "\(EditorTelemetryStore.shared.cursorLine)"
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
                 isFocused = true
             }

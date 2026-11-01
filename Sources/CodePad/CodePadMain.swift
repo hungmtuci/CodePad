@@ -48,9 +48,10 @@ final class CodePadAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         WorkspaceStore.shared.refreshSystemAppearance()
-        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { _, _ in
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             Task { @MainActor in
                 WorkspaceStore.shared.refreshSystemAppearance()
+                self?.mainWindow?.backgroundColor = WorkspaceStore.shared.effectivePalette.chromeBackgroundNS
             }
         }
 
@@ -124,6 +125,10 @@ final class CodePadAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            // Fast O(1) bitwise exit so normal typing never allocates Strings or queries WorkspaceStore
+            guard !flags.isDisjoint(with: [.command, .control]) else {
+                return event
+            }
             guard let chars = event.charactersIgnoringModifiers?.lowercased(), !chars.isEmpty else {
                 return event
             }
@@ -427,15 +432,48 @@ private enum SelfVerificationRunner {
             do {
                 try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
-                // 1. Verify LanguageDetector across languages
-                assert(LanguageDetector.detect(from: "import SwiftUI\n@MainActor struct Demo: View {}") == .swift)
-                assert(LanguageDetector.detect(from: "def fib(n):\n    if n <= 1:\n        return n\n    return fib(n-1)") == .python)
-                assert(LanguageDetector.detect(from: "<!DOCTYPE html><html><body><h1>Hi</h1></body></html>") == .html)
-                assert(LanguageDetector.detect(from: "# Tiêu đề\n\n- [x] Mục 1\n\n```js\nconsole.log(1)\n```") == .markdown)
-                assert(LanguageDetector.detect(from: "{\"name\": \"CodePad\", \"ok\": true}") == .json)
-                assert(LanguageDetector.detect(from: "SELECT id, email FROM users WHERE active = 1 ORDER BY id DESC;") == .sql)
+                // 1. Verify LanguageDetector across languages + large input fast-path
+                precondition(LanguageDetector.detect(from: "import SwiftUI\n@MainActor struct Demo: View {}") == .swift)
+                precondition(LanguageDetector.detect(from: "def fib(n):\n    if n <= 1:\n        return n\n    return fib(n-1)") == .python)
+                precondition(LanguageDetector.detect(from: "<!DOCTYPE html><html><body><h1>Hi</h1></body></html>") == .html)
+                precondition(LanguageDetector.detect(from: "# Tiêu đề\n\n- [x] Mục 1\n\n```js\nconsole.log(1)\n```") == .markdown)
+                precondition(LanguageDetector.detect(from: "{\"name\": \"CodePad\", \"ok\": true}") == .json)
+                precondition(LanguageDetector.detect(from: "SELECT id, email FROM users WHERE active = 1 ORDER BY id DESC;") == .sql)
+                precondition(LanguageDetector.detect(from: "id,name,score\n1,An,98.5\n2,Binh,95.0") == .csv)
+                precondition(LanguageDetector.detect(from: "package main\nimport \"fmt\"\nfunc main() { fmt.Println(1) }") == .go)
+                precondition(CodeLanguage.fromFenceAlias("tsx") == .typescript)
+                precondition(CodeLanguage.fromFenceAlias("bash") == .shell)
 
-                // 2. Verify PDF, DOCX, RTF, HTML & PNG exports on both Markdown & Code
+                // 2. Verify DocumentTab O(1) cached metrics & Codable round-trip
+                var metricTab = DocumentTab(content: "# Xin chào CodePad\nDòng hai có năm từ\n", language: .markdown)
+                precondition(metricTab.lineCount == 3, "lineCount mismatch: \(metricTab.lineCount)")
+                precondition(metricTab.wordCount == 9, "wordCount mismatch: \(metricTab.wordCount)")
+                precondition(metricTab.displayTitle == "Xin chào CodePad", "displayTitle mismatch: \(metricTab.displayTitle)")
+                metricTab.content = "let a = 1"
+                precondition(metricTab.lineCount == 1)
+                precondition(metricTab.wordCount == 4)
+                let encodedTab = try JSONEncoder().encode(metricTab)
+                let decodedTab = try JSONDecoder().decode(DocumentTab.self, from: encodedTab)
+                precondition(decodedTab.lineCount == 1 && decodedTab.wordCount == 4 && decodedTab.characterCount == 9)
+
+                // 3. Verify SyntaxHighlighter CSV header & C-style keyword & 64-bit bitset boundary fixes
+                let csvSpans = SyntaxHighlighter.tokenize(code: "\"id\",\"name\",\"score\"\n101,\"Minh\",99.5", language: .csv)
+                precondition(csvSpans.contains(where: { $0.kind == .heading && $0.range.location == 0 && $0.range.length == 19 }))
+                precondition(csvSpans.contains(where: { $0.kind == .number }))
+                precondition(csvSpans.contains(where: { $0.kind == .string }))
+
+                let goSpans = SyntaxHighlighter.tokenize(code: "for idx, val := range items { return val }", language: .go)
+                precondition(goSpans.filter { $0.kind == .keyword }.count >= 3)
+
+                let rubySpans = SyntaxHighlighter.tokenize(code: "begin\n  work()\nrescue => e\n  return nil\nend", language: .ruby)
+                precondition(rubySpans.filter { $0.kind == .keyword }.count >= 4)
+
+                // Boundary test across UTF-16 offset 64 inside a comment so inner keywords are masked
+                let longComment = "// " + String(repeating: "x", count: 58) + " import struct class return 12345"
+                let boundarySpans = SyntaxHighlighter.tokenize(code: longComment, language: .swift)
+                precondition(boundarySpans.count == 1 && boundarySpans[0].kind == .comment)
+
+                // 4. Verify PDF, DOCX, HTML & PNG exports on both Markdown & Code
                 let mdTab = DocumentTab(
                     customTitle: "TaiLieuThuNghiem.md",
                     content: "# Kiểm thử CodePad Tiếng Việt\n\nĐoạn văn **in đậm** và bảng dữ liệu:\n\n| Ngôn ngữ | Tự động Highlight |\n| :--- | :---: |\n| Swift | Có |\n| Python | Có |\n\n```python\ndef chao(ten: str):\n    print(f\"Xin chào {ten}\")\n```",
@@ -461,7 +499,12 @@ private enum SelfVerificationRunner {
                 )
                 try await ExportService.shared.exportDocument(tab: codeTab, format: .pngCard, to: pngURL, preferences: prefs)
 
-                print("VERIFY_OK: All language detections & PDF/DOCX/HTML/PNG exports succeeded!")
+                for outFile in [pdfURL, docxURL, htmlURL, pngURL] {
+                    let size = (try FileManager.default.attributesOfItem(atPath: outFile.path)[.size] as? Int) ?? 0
+                    precondition(size > 200, "Expected non-empty exported file at \(outFile.lastPathComponent)")
+                }
+
+                print("VERIFY_OK: All unit assertions, tokenizer checks, language detections & PDF/DOCX/HTML/PNG exports succeeded!")
                 exit(0)
             } catch {
                 fputs("VERIFY_FAILED: \(error)\n", stderr)

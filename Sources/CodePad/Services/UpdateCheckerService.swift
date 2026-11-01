@@ -68,7 +68,7 @@ final class UpdateCheckerService: ObservableObject {
     }
 
     var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.2"
     }
 
     var availableUpdateInfo: ReleaseUpdateInfo? {
@@ -599,13 +599,15 @@ final class UpdateCheckerService: ObservableObject {
         DST_PARENT="$(dirname "$DST_APP")"
         if [ -w "$DST_PARENT" ] && { [ ! -e "$DST_APP" ] || [ -w "$DST_APP" ]; } && rm -rf "$DST_APP" 2>/dev/null && /usr/bin/ditto --noextattr "$SRC_APP" "$DST_APP" 2>/dev/null; then
             /usr/bin/xattr -cr "$DST_APP" 2>/dev/null || true
+            /usr/bin/codesign --force --deep --sign - "$DST_APP" 2>/dev/null || true
         else
-            /usr/bin/osascript -e "do shell script \\"rm -rf '$DST_APP' && /usr/bin/ditto --noextattr '$SRC_APP' '$DST_APP' && /usr/bin/xattr -cr '$DST_APP'\\" with administrator privileges" 2>/dev/null || true
+            /usr/bin/osascript -e "do shell script \\"rm -rf '$DST_APP' && /usr/bin/ditto --noextattr '$SRC_APP' '$DST_APP' && /usr/bin/xattr -cr '$DST_APP' && /usr/bin/codesign --force --deep --sign - '$DST_APP'\\" with administrator privileges" 2>/dev/null || true
         fi
 
         if [ -n "$DST_SECONDARY" ] && [ -d "$DST_SECONDARY" ]; then
             rm -rf "$DST_SECONDARY" 2>/dev/null && /usr/bin/ditto --noextattr "$SRC_APP" "$DST_SECONDARY" 2>/dev/null || true
             /usr/bin/xattr -cr "$DST_SECONDARY" 2>/dev/null || true
+            /usr/bin/codesign --force --deep --sign - "$DST_SECONDARY" 2>/dev/null || true
         fi
 
         /usr/bin/open "$DST_APP"

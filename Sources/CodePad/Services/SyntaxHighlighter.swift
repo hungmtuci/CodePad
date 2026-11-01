@@ -27,6 +27,75 @@ struct SyntaxTokenSpan: Sendable {
 enum SyntaxHighlighter {
     private static let maxFullHighlightUTF16Length = 220_000
 
+    private struct CompiledTokenRule: @unchecked Sendable {
+        let regex: NSRegularExpression
+        let kind: SyntaxTokenKind
+        let captureGroup: Int
+    }
+
+    private struct OccupiedBitset {
+        private var words: [UInt64]
+
+        init(utf16Length: Int) {
+            self.words = [UInt64](repeating: 0, count: max(1, (utf16Length + 63) >> 6))
+        }
+
+        @inline(__always)
+        func hasAnySet(in range: NSRange) -> Bool {
+            let start = range.location
+            let end = start + range.length
+            let firstWord = start >> 6
+            let lastWord = (end - 1) >> 6
+            let startMask = UInt64.max << (start & 63)
+            let endMask = UInt64.max >> (63 - ((end - 1) & 63))
+
+            if firstWord == lastWord {
+                return (words[firstWord] & startMask & endMask) != 0
+            }
+            if (words[firstWord] & startMask) != 0 || (words[lastWord] & endMask) != 0 {
+                return true
+            }
+            for w in (firstWord + 1)..<lastWord where words[w] != 0 {
+                return true
+            }
+            return false
+        }
+
+        @inline(__always)
+        mutating func setRange(_ range: NSRange) {
+            let start = range.location
+            let end = start + range.length
+            let firstWord = start >> 6
+            let lastWord = (end - 1) >> 6
+            let startMask = UInt64.max << (start & 63)
+            let endMask = UInt64.max >> (63 - ((end - 1) & 63))
+
+            if firstWord == lastWord {
+                words[firstWord] |= (startMask & endMask)
+                return
+            }
+            words[firstWord] |= startMask
+            for w in (firstWord + 1)..<lastWord {
+                words[w] = UInt64.max
+            }
+            words[lastWord] |= endMask
+        }
+    }
+
+    private static let compiledRulesByLanguage: [CodeLanguage: [CompiledTokenRule]] = {
+        var table: [CodeLanguage: [CompiledTokenRule]] = [:]
+        for lang in CodeLanguage.allCases {
+            let rawRules = syntaxRules(for: lang)
+            table[lang] = rawRules.compactMap { rule in
+                guard let regex = try? NSRegularExpression(pattern: rule.pattern, options: rule.options) else {
+                    return nil
+                }
+                return CompiledTokenRule(regex: regex, kind: rule.kind, captureGroup: rule.captureGroup)
+            }
+        }
+        return table
+    }()
+
     // MARK: - Core Tokenizer
 
     static func tokenize(code: String, language: CodeLanguage) -> [SyntaxTokenSpan] {
@@ -36,38 +105,24 @@ enum SyntaxHighlighter {
         guard fullLength > 0 else { return [] }
         let targetRange = NSRange(location: 0, length: min(fullLength, maxFullHighlightUTF16Length))
 
-        let rules = syntaxRules(for: language)
-        guard !rules.isEmpty else { return [] }
+        guard let rules = compiledRulesByLanguage[language], !rules.isEmpty else { return [] }
 
-        // Bitmask array over UTF-16 code units so higher-priority tokens (comments, strings)
-        // never get overwritten by inner keywords/numbers.
-        var occupied = [Bool](repeating: false, count: targetRange.length)
+        // Compact 64-bit word bitset over UTF-16 code units (64x smaller & faster than [Bool])
+        // so higher-priority tokens (comments, strings) never get overwritten by inner keywords/numbers.
+        var occupied = OccupiedBitset(utf16Length: targetRange.length)
         var spans: [SyntaxTokenSpan] = []
         spans.reserveCapacity(min(targetRange.length / 8, 8192))
 
         for rule in rules {
-            guard let regex = CachedRegex.get(rule.pattern, options: rule.options) else { continue }
-            regex.enumerateMatches(in: code, options: [], range: targetRange) { match, _, _ in
+            rule.regex.enumerateMatches(in: code, options: [], range: targetRange) { match, _, _ in
                 guard let match else { return }
                 let r = rule.captureGroup < match.numberOfRanges ? match.range(at: rule.captureGroup) : match.range
                 guard r.location != NSNotFound, r.length > 0, r.location + r.length <= targetRange.length else { return }
 
-                // Quick overlap check (check start, middle, end first for O(1) fast reject)
-                let end = r.location + r.length
-                let mid = r.location + (r.length >> 1)
-                if occupied[r.location] || occupied[end - 1] || occupied[mid] {
+                if occupied.hasAnySet(in: r) {
                     return
                 }
-                var hasOverlap = false
-                for idx in r.location..<end where occupied[idx] {
-                    hasOverlap = true
-                    break
-                }
-                if hasOverlap { return }
-
-                for idx in r.location..<end {
-                    occupied[idx] = true
-                }
+                occupied.setRange(r)
                 spans.append(SyntaxTokenSpan(range: r, kind: rule.kind))
             }
         }
@@ -79,6 +134,7 @@ enum SyntaxHighlighter {
     // MARK: - Apply Directly to NSTextStorage (Zero-Flicker, Preserves Cursor & Undo)
 
     @MainActor
+    @discardableResult
     static func applyHighlighting(
         to textStorage: NSTextStorage,
         language: CodeLanguage,
@@ -87,10 +143,10 @@ enum SyntaxHighlighter {
         boldFont: NSFont,
         italicFont: NSFont,
         paragraphStyle: NSParagraphStyle
-    ) {
+    ) -> [SyntaxTokenSpan] {
         let code = textStorage.string
         let fullRange = NSRange(location: 0, length: (code as NSString).length)
-        guard fullRange.length > 0 else { return }
+        guard fullRange.length > 0 else { return [] }
 
         let spans = tokenize(code: code, language: language)
 
@@ -104,10 +160,8 @@ enum SyntaxHighlighter {
             range: fullRange
         )
 
-        for span in spans {
-            guard span.range.location + span.range.length <= fullRange.length else { continue }
-            let color = nsColor(for: span.kind, in: palette)
-            textStorage.addAttribute(.foregroundColor, value: color, range: span.range)
+        for span in spans where span.range.location + span.range.length <= fullRange.length {
+            textStorage.addAttribute(.foregroundColor, value: palette.tokenNSColor(for: span.kind), range: span.range)
 
             switch span.kind {
             case .comment, .emphasisItalic:
@@ -119,6 +173,7 @@ enum SyntaxHighlighter {
             }
         }
         textStorage.endEditing()
+        return spans
     }
 
     // MARK: - Rich NSAttributedString (Clipboard Rich Copy & PNG Card Snapshot)
@@ -150,7 +205,7 @@ enum SyntaxHighlighter {
         let fullLen = (code as NSString).length
         let spans = tokenize(code: code, language: language)
         for span in spans where span.range.location + span.range.length <= fullLen {
-            attr.addAttribute(.foregroundColor, value: nsColor(for: span.kind, in: palette), range: span.range)
+            attr.addAttribute(.foregroundColor, value: palette.tokenNSColor(for: span.kind), range: span.range)
             switch span.kind {
             case .comment, .emphasisItalic:
                 attr.addAttribute(.font, value: italicFont, range: span.range)
@@ -189,7 +244,7 @@ enum SyntaxHighlighter {
                 rawPieces.append((plain, nil))
             }
             let tokText = nsString.substring(with: span.range)
-            let hex = hexColor(for: span.kind, in: palette)
+            let hex = palette.tokenHex(for: span.kind)
             var css = "color:\(hex);"
             switch span.kind {
             case .keyword, .heading, .emphasisBold, .tag:
@@ -286,41 +341,37 @@ enum SyntaxHighlighter {
     }
 
     static func escapeHTML(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
+        guard text.utf8.contains(where: { $0 == 38 || $0 == 60 || $0 == 62 || $0 == 34 }) else {
+            return text
+        }
+        var out = ""
+        out.reserveCapacity(text.utf8.count + 16)
+        for ch in text {
+            switch ch {
+            case "&": out += "&amp;"
+            case "<": out += "&lt;"
+            case ">": out += "&gt;"
+            case "\"": out += "&quot;"
+            default: out.append(ch)
+            }
+        }
+        return out
     }
 
     private static func escapeHTMLPreservingLeadingSpaces(_ text: String) -> String {
-        let expanded = text.replacingOccurrences(of: "\t", with: "    ")
+        let expanded = text.contains("\t") ? text.replacingOccurrences(of: "\t", with: "    ") : text
         let escaped = escapeHTML(expanded)
-        return escaped.replacingOccurrences(of: "  ", with: "\u{00A0} ")
+        return escaped.contains("  ") ? escaped.replacingOccurrences(of: "  ", with: "\u{00A0} ") : escaped
     }
 
+    @inline(__always)
     static func nsColor(for kind: SyntaxTokenKind, in palette: EditorThemePalette) -> NSColor {
-        NSColor.fromHex(hexColor(for: kind, in: palette))
+        palette.tokenNSColor(for: kind)
     }
 
+    @inline(__always)
     static func hexColor(for kind: SyntaxTokenKind, in palette: EditorThemePalette) -> String {
-        switch kind {
-        case .comment: return palette.commentHex
-        case .string: return palette.stringHex
-        case .number: return palette.numberHex
-        case .keyword: return palette.keywordHex
-        case .type: return palette.typeHex
-        case .function: return palette.functionHex
-        case .property: return palette.propertyHex
-        case .tag: return palette.tagHex
-        case .attribute: return palette.attributeHex
-        case .operatorSymbol: return palette.operatorHex
-        case .decorator: return palette.decoratorHex
-        case .heading: return palette.headingHex
-        case .emphasisBold: return palette.keywordHex
-        case .emphasisItalic: return palette.typeHex
-        case .link: return palette.functionHex
-        }
+        palette.tokenHex(for: kind)
     }
 
     // MARK: - Language Grammar Rules
@@ -473,8 +524,8 @@ enum SyntaxHighlighter {
 
         case .csv:
             return [
+                TokenRule(#"\A[^\r\n]+"#, kind: .heading),
                 TokenRule(#""(?:""|[^"])*""#, kind: .string),
-                TokenRule(#"(?m)^[^\n]+"#, kind: .heading),
                 TokenRule(#"-?\b\d+(\.\d+)?\b"#, kind: .number),
                 TokenRule(#"[,;\t]"#, kind: .operatorSymbol)
             ]
@@ -511,7 +562,7 @@ enum SyntaxHighlighter {
         }
         rules.append(TokenRule(#"@[A-Za-z_]\w*"#, kind: .decorator))
         rules.append(TokenRule(
-            #"\b(abstract|alignof|as|async|await|auto|bool|break|case|catch|char|class|const|constexpr|continue|crate|def|default|defer|delete|do|double|dyn|else|elsif|end|enum|extern|false|final|finally|float|fn|for|friend|func|go|goto|if|impl|implements|import|in|inline|int|interface|internal|let|long|loop|match|mod|module|move|mut|namespace|new|nil|null|nullptr|object|operator|override|package|php|private|protected|pub|public| range|readonly|ref|register|require|return| rescue|select|self|short|signed|sizeof|static|struct|super|switch|synchronized|template|then|this|throw|throws|trait|true|try|type|typedef|typename|uint|union|unless|unsafe|unsigned|use|using|val|var|virtual|void|volatile|where|while|yield)\b"#,
+            #"\b(abstract|alignof|as|async|await|auto|begin|bool|break|case|catch|char|class|const|constexpr|continue|crate|def|default|defer|delete|do|double|dyn|else|elsif|end|ensure|enum|extern|false|final|finally|float|fn|for|friend|func|go|goto|if|impl|implements|import|in|inline|int|interface|internal|let|long|loop|match|mod|module|move|mut|namespace|new|nil|null|nullptr|object|operator|override|package|php|private|protected|pub|public|range|readonly|ref|register|require|return|rescue|select|self|short|signed|sizeof|static|struct|super|switch|synchronized|template|then|this|throw|throws|trait|true|try|type|typedef|typename|uint|union|unless|unsafe|unsigned|use|using|val|var|virtual|void|volatile|where|while|yield)\b"#,
             kind: .keyword
         ))
         rules.append(TokenRule(#"\b([A-Z][A-Za-z0-9_]*)\b"#, kind: .type))

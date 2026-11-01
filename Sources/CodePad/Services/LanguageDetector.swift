@@ -4,7 +4,13 @@ enum LanguageDetector {
     /// Detects the most likely programming or markup language from raw source/pasted text.
     /// Designed to execute in <1ms so paste & live typing never stutter.
     static func detect(from rawText: String) -> CodeLanguage {
-        let sample = String(rawText.prefix(16_000))
+        guard !rawText.isEmpty else { return .plainText }
+        let sample: String = {
+            if rawText.utf8.count <= 16_000 {
+                return rawText
+            }
+            return String(rawText.prefix(16_000))
+        }()
         let trimmed = sample.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .plainText }
 
@@ -44,9 +50,9 @@ enum LanguageDetector {
             return .xml
         }
 
-        // 4. Exact JSON check
+        // 4. Exact JSON check (O(1) UTF-8 byte count guard instead of O(N) grapheme traversal)
         if (trimmed.hasPrefix("{") && trimmed.hasSuffix("}")) || (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")) {
-            if let data = rawText.count <= 250_000 ? rawText.data(using: .utf8) : nil,
+            if let data = rawText.utf8.count <= 250_000 ? rawText.data(using: .utf8) : nil,
                (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil {
                 return .json
             }
@@ -190,20 +196,39 @@ enum LanguageDetector {
             add(.shell, 10)
         }
 
-        // YAML signals
-        let yamlKeyLines = lines.filter { matchesRegex(#"^\s*[\w.\-]+\s*:\s*(\S.*)?$"#, in: $0) }
-        if yamlKeyLines.count >= 3 && !sample.contains("{") && !sample.contains(";") && !sample.contains("<div") {
-            add(.yaml, 8 + min(yamlKeyLines.count, 8))
+        // YAML signals (hoist compiled regex outside line loop)
+        if !sample.contains("{") && !sample.contains(";") && !sample.contains("<div"),
+           let yamlRx = CachedRegex.get(#"^\s*[\w.\-]+\s*:\s*(\S.*)?$"#) {
+            var yamlKeyLineCount = 0
+            for ln in lines {
+                let r = NSRange(ln.startIndex..<ln.endIndex, in: ln)
+                if yamlRx.firstMatch(in: ln, options: [], range: r) != nil {
+                    yamlKeyLineCount += 1
+                }
+            }
+            if yamlKeyLineCount >= 3 {
+                add(.yaml, 8 + min(yamlKeyLineCount, 8))
+            }
         }
 
-        // CSV / TSV signals
+        // CSV / TSV signals (zero-allocation UTF-8 byte counting)
         if lines.count >= 2 && !sample.contains("{") && !sample.contains("<") && mdSignals < 4 {
-            let commaCounts = lines.prefix(10).filter { !$0.isEmpty }.map { $0.filter { $0 == "," }.count }
+            var commaCounts: [Int] = []
+            var tabCounts: [Int] = []
+            for ln in lines.prefix(10) where !ln.isEmpty {
+                var commas = 0
+                var tabs = 0
+                for b in ln.utf8 {
+                    if b == 44 { commas += 1 }
+                    else if b == 9 { tabs += 1 }
+                }
+                commaCounts.append(commas)
+                tabCounts.append(tabs)
+            }
             if let firstCount = commaCounts.first, firstCount >= 2, commaCounts.count >= 2,
                commaCounts.allSatisfy({ $0 == firstCount }) {
                 add(.csv, 11)
             }
-            let tabCounts = lines.prefix(10).filter { !$0.isEmpty }.map { $0.filter { $0 == "\t" }.count }
             if let firstTab = tabCounts.first, firstTab >= 2, tabCounts.count >= 2,
                tabCounts.allSatisfy({ $0 == firstTab }) {
                 add(.csv, 11)

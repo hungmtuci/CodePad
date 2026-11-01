@@ -76,5 +76,5 @@ chmod +x build_codepad.sh
 
 Sau khi chạy xong:
 - Ứng dụng hoàn chỉnh: `CodePad.app`
-- Bộ cài đặt DMG: `dist/CodePad-Installer-v1.0.0.dmg`
-- Bản nén ZIP: `dist/CodePad-v1.0.0-macOS.zip`
+- Bộ cài đặt DMG: `dist/CodePad-Installer-v1.0.2.dmg`
+- Bản nén ZIP: `dist/CodePad-v1.0.2-macOS.zip`

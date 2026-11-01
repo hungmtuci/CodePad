@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import WebKit
 
@@ -138,7 +139,7 @@ struct LivePreviewPaneView: View {
                     title: tab.displayTitle,
                     baseURL: tab.fileURL?.deletingLastPathComponent(),
                     palette: previewPalette,
-                    scrollFraction: store.preferences.syncPreviewScroll ? store.editorScrollFraction : nil
+                    syncScrollEnabled: store.preferences.syncPreviewScroll
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -163,7 +164,7 @@ struct FloatingPreviewWindowRootView: View {
     }
 }
 
-// MARK: - Debounced Scroll-Preserving WKWebView Wrapper
+// MARK: - Debounced Scroll-Preserving & In-Place DOM Morphing WKWebView Wrapper
 
 private struct LivePreviewWebRepresentable: NSViewRepresentable {
     let content: String
@@ -171,7 +172,7 @@ private struct LivePreviewWebRepresentable: NSViewRepresentable {
     let title: String
     let baseURL: URL?
     let palette: EditorThemePalette
-    let scrollFraction: Double?
+    let syncScrollEnabled: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -189,64 +190,183 @@ private struct LivePreviewWebRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        let html = MarkdownHTMLRenderer.buildLivePreviewHTML(
+        context.coordinator.configureScrollSync(enabled: syncScrollEnabled)
+        context.coordinator.scheduleRenderIfNeeded(
             content: content,
             language: language,
             palette: palette,
-            title: title
+            title: title,
+            baseURL: baseURL
         )
-        context.coordinator.scheduleLoadIfNeeded(html: html, baseURL: baseURL)
-        if let frac = scrollFraction {
-            context.coordinator.syncScroll(to: frac)
-        }
     }
 
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
         weak var webView: WKWebView?
-        private var lastLoadedHTML: String = ""
-        private var pendingHTML: String?
-        private var pendingBaseURL: URL?
+
+        private var lastRenderedContent: String?
+        private var lastRenderedLanguage: CodeLanguage?
+        private var lastRenderedPaletteID: EditorThemeID?
+        private var lastRenderedTitle: String?
+        private var lastRenderedBaseURL: URL?
+
+        private var isMarkdownShellLoaded = false
+        private var loadedMarkdownHasMath = false
         private var debounceItem: DispatchWorkItem?
         private var savedScrollY: Double = 0
         private var lastSyncedFraction: Double = -1
+        private var scrollCancellable: AnyCancellable?
+        private var isScrollSyncEnabled = false
 
-        func scheduleLoadIfNeeded(html: String, baseURL: URL?) {
-            guard html != lastLoadedHTML else { return }
-            pendingHTML = html
-            pendingBaseURL = baseURL
+        func configureScrollSync(enabled: Bool) {
+            guard enabled != isScrollSyncEnabled else { return }
+            isScrollSyncEnabled = enabled
+            if enabled {
+                scrollCancellable = EditorTelemetryStore.shared.$scrollFraction
+                    .removeDuplicates { abs($0 - $1) < 0.006 }
+                    .sink { [weak self] frac in
+                        self?.syncScroll(to: frac)
+                    }
+            } else {
+                scrollCancellable?.cancel()
+                scrollCancellable = nil
+            }
+        }
 
-            debounceItem?.cancel()
-            if lastLoadedHTML.isEmpty {
-                commitPendingHTML()
+        func scheduleRenderIfNeeded(
+            content: String,
+            language: CodeLanguage,
+            palette: EditorThemePalette,
+            title: String,
+            baseURL: URL?
+        ) {
+            // Fast O(1) metadata + string equality check BEFORE running Markdown/HTML parser!
+            if lastRenderedLanguage == language,
+               lastRenderedPaletteID == palette.id,
+               lastRenderedBaseURL == baseURL,
+               lastRenderedTitle == title,
+               lastRenderedContent == content {
                 return
             }
+
+            let isFirstRender = (lastRenderedLanguage == nil)
+            debounceItem?.cancel()
+
+            if isFirstRender {
+                commitRender(
+                    content: content,
+                    language: language,
+                    palette: palette,
+                    title: title,
+                    baseURL: baseURL
+                )
+                return
+            }
+
             let item = DispatchWorkItem { [weak self] in
                 Task { @MainActor in
-                    self?.commitPendingHTML()
+                    self?.commitRender(
+                        content: content,
+                        language: language,
+                        palette: palette,
+                        title: title,
+                        baseURL: baseURL
+                    )
                 }
             }
             debounceItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.11, execute: item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.085, execute: item)
         }
 
-        private func commitPendingHTML() {
-            guard let wv = webView, let html = pendingHTML else { return }
-            lastLoadedHTML = html
-            let base = pendingBaseURL
+        private func commitRender(
+            content: String,
+            language: CodeLanguage,
+            palette: EditorThemePalette,
+            title: String,
+            baseURL: URL?
+        ) {
+            guard let wv = webView else { return }
+
+            let sameMarkdownShell = (language == .markdown)
+                && (lastRenderedLanguage == .markdown)
+                && (lastRenderedPaletteID == palette.id)
+                && (lastRenderedBaseURL == baseURL)
+                && isMarkdownShellLoaded
+
+            let needsMermaid = content.contains("```mermaid")
+            let needsMath = content.contains("$$") || content.contains("\\(") || content.contains("\\[")
+
+            lastRenderedContent = content
+            lastRenderedLanguage = language
+            lastRenderedPaletteID = palette.id
+            lastRenderedTitle = title
+            lastRenderedBaseURL = baseURL
+
+            // Fast zero-flicker in-place DOM morph for live Markdown editing (preserves scroll & avoids WebKit reload)
+            if sameMarkdownShell && !needsMermaid && (!needsMath || loadedMarkdownHasMath) {
+                let bodyHTML = MarkdownHTMLRenderer.renderMarkdownBodyHTML(content, palette: palette)
+                wv.callAsyncJavaScript(
+                    "return window.__codepadSetMarkdownBody ? window.__codepadSetMarkdownBody(body) : false;",
+                    arguments: ["body": bodyHTML],
+                    in: nil,
+                    in: .page
+                ) { [weak self] result in
+                    Task { @MainActor in
+                        if case let .success(ok as Bool) = result, ok {
+                            return
+                        }
+                        self?.performFullDocumentLoad(
+                            content: content,
+                            language: language,
+                            palette: palette,
+                            title: title,
+                            baseURL: baseURL
+                        )
+                    }
+                }
+                return
+            }
+
+            performFullDocumentLoad(
+                content: content,
+                language: language,
+                palette: palette,
+                title: title,
+                baseURL: baseURL
+            )
+        }
+
+        private func performFullDocumentLoad(
+            content: String,
+            language: CodeLanguage,
+            palette: EditorThemePalette,
+            title: String,
+            baseURL: URL?
+        ) {
+            guard let wv = webView else { return }
+            isMarkdownShellLoaded = false
+            loadedMarkdownHasMath = (language == .markdown)
+                && (content.contains("$$") || content.contains("\\(") || content.contains("\\["))
+
+            let html = MarkdownHTMLRenderer.buildLivePreviewHTML(
+                content: content,
+                language: language,
+                palette: palette,
+                title: title
+            )
 
             wv.evaluateJavaScript("window.scrollY || 0") { [weak self] val, _ in
                 Task { @MainActor in
                     if let num = val as? Double {
                         self?.savedScrollY = num
                     }
-                    wv.loadHTMLString(html, baseURL: base)
+                    wv.loadHTMLString(html, baseURL: baseURL)
                 }
             }
         }
 
         func syncScroll(to fraction: Double) {
-            guard abs(fraction - lastSyncedFraction) > 0.008, let wv = webView else { return }
+            guard abs(fraction - lastSyncedFraction) > 0.006, let wv = webView else { return }
             lastSyncedFraction = fraction
             let js = """
             (function(){
@@ -258,6 +378,9 @@ private struct LivePreviewWebRepresentable: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            if lastRenderedLanguage == .markdown {
+                isMarkdownShellLoaded = true
+            }
             if savedScrollY > 0 {
                 webView.evaluateJavaScript("window.scrollTo(0, \(savedScrollY));", completionHandler: nil)
             }

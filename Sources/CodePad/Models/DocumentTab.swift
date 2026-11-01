@@ -3,7 +3,13 @@ import Foundation
 struct DocumentTab: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
     var customTitle: String?
-    var content: String
+    var content: String {
+        didSet {
+            if content != oldValue {
+                recomputeMetrics()
+            }
+        }
+    }
     var language: CodeLanguage
     var isLanguageAutoDetected: Bool
     var fileURL: URL?
@@ -11,6 +17,25 @@ struct DocumentTab: Identifiable, Codable, Equatable, Sendable {
     var cursorLocation: Int
     var createdAt: Date
     var updatedAt: Date
+
+    // Cached O(1) document metrics & smart first-line title (recomputed once per content mutation)
+    private(set) var lineCount: Int = 1
+    private(set) var characterCount: Int = 0
+    private(set) var wordCount: Int = 0
+    private var cachedAutoTitle: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case customTitle
+        case content
+        case language
+        case isLanguageAutoDetected
+        case fileURL
+        case isDirty
+        case cursorLocation
+        case createdAt
+        case updatedAt
+    }
 
     init(
         id: UUID = UUID(),
@@ -34,22 +59,98 @@ struct DocumentTab: Identifiable, Codable, Equatable, Sendable {
         self.cursorLocation = cursorLocation
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.recomputeMetrics()
     }
 
-    /// Sublime-style smart tab title: saved filename > customTitle > first meaningful non-empty line > "Untitled".
-    var displayTitle: String {
-        if let fileURL {
-            return fileURL.lastPathComponent
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.customTitle = try container.decodeIfPresent(String.self, forKey: .customTitle)
+        self.content = try container.decode(String.self, forKey: .content)
+        self.language = try container.decode(CodeLanguage.self, forKey: .language)
+        self.isLanguageAutoDetected = try container.decode(Bool.self, forKey: .isLanguageAutoDetected)
+        self.fileURL = try container.decodeIfPresent(URL.self, forKey: .fileURL)
+        self.isDirty = try container.decode(Bool.self, forKey: .isDirty)
+        self.cursorLocation = try container.decode(Int.self, forKey: .cursorLocation)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        self.recomputeMetrics()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(customTitle, forKey: .customTitle)
+        try container.encode(content, forKey: .content)
+        try container.encode(language, forKey: .language)
+        try container.encode(isLanguageAutoDetected, forKey: .isLanguageAutoDetected)
+        try container.encodeIfPresent(fileURL, forKey: .fileURL)
+        try container.encode(isDirty, forKey: .isDirty)
+        try container.encode(cursorLocation, forKey: .cursorLocation)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+
+    private mutating func recomputeMetrics() {
+        guard !content.isEmpty else {
+            lineCount = 1
+            characterCount = 0
+            wordCount = 0
+            cachedAutoTitle = nil
+            return
         }
-        if let customTitle, !customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return customTitle
+
+        // Single-pass zero-allocation scan for lineCount, wordCount, characterCount, and first non-empty line
+        var lines = 1
+        var chars = 0
+        var words = 0
+        var inWord = false
+        var firstNonEmptyStart: String.Index?
+        var firstNonEmptyEnd: String.Index?
+        var currentLineHasNonSpace = false
+
+        var idx = content.startIndex
+        let end = content.endIndex
+        while idx < end {
+            let ch = content[idx]
+            chars += 1
+
+            if ch == "\n" {
+                lines += 1
+                inWord = false
+                if currentLineHasNonSpace && firstNonEmptyEnd == nil {
+                    firstNonEmptyEnd = idx
+                }
+            } else if ch == "\r" {
+                inWord = false
+                if currentLineHasNonSpace && firstNonEmptyEnd == nil {
+                    firstNonEmptyEnd = idx
+                }
+            } else if ch.isWhitespace {
+                inWord = false
+            } else {
+                if !inWord {
+                    words += 1
+                    inWord = true
+                }
+                if firstNonEmptyStart == nil {
+                    firstNonEmptyStart = idx
+                    currentLineHasNonSpace = true
+                }
+            }
+            content.formIndex(after: &idx)
         }
-        let firstLine = content
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty }
-        if let firstLine {
-            var cleaned = firstLine
+
+        if currentLineHasNonSpace && firstNonEmptyEnd == nil {
+            firstNonEmptyEnd = end
+        }
+
+        self.lineCount = lines
+        self.characterCount = chars
+        self.wordCount = words
+
+        if let s = firstNonEmptyStart, let e = firstNonEmptyEnd, s < e {
+            var cleaned = content[s..<e].trimmingCharacters(in: .whitespaces)
             while cleaned.hasPrefix("#") || cleaned.hasPrefix("//") || cleaned.hasPrefix("/*") || cleaned.hasPrefix("<!--") {
                 if cleaned.hasPrefix("<!--") {
                     cleaned.removeFirst(4)
@@ -65,8 +166,25 @@ struct DocumentTab: Identifiable, Codable, Equatable, Sendable {
             }
             if !cleaned.isEmpty {
                 let truncated = String(cleaned.prefix(28))
-                return cleaned.count > 28 ? "\(truncated)…" : truncated
+                self.cachedAutoTitle = cleaned.count > 28 ? "\(truncated)…" : truncated
+            } else {
+                self.cachedAutoTitle = nil
             }
+        } else {
+            self.cachedAutoTitle = nil
+        }
+    }
+
+    /// Sublime-style smart tab title: saved filename > customTitle > first meaningful non-empty line > "Untitled".
+    var displayTitle: String {
+        if let fileURL {
+            return fileURL.lastPathComponent
+        }
+        if let customTitle, !customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return customTitle
+        }
+        if let cachedAutoTitle {
+            return cachedAutoTitle
         }
         return "Untitled.\(language.defaultExtension)"
     }
@@ -84,21 +202,17 @@ struct DocumentTab: Identifiable, Codable, Equatable, Sendable {
         return raw.isEmpty ? "CodePad-Document" : raw
     }
 
-    var lineCount: Int {
-        guard !content.isEmpty else { return 1 }
-        var count = 1
-        for ch in content where ch == "\n" {
-            count += 1
-        }
-        return count
-    }
-
-    var characterCount: Int {
-        content.count
-    }
-
-    var wordCount: Int {
-        content.split { $0.isWhitespace || $0.isNewline }.count
+    static func == (lhs: DocumentTab, rhs: DocumentTab) -> Bool {
+        lhs.id == rhs.id
+            && lhs.isDirty == rhs.isDirty
+            && lhs.language == rhs.language
+            && lhs.isLanguageAutoDetected == rhs.isLanguageAutoDetected
+            && lhs.characterCount == rhs.characterCount
+            && lhs.lineCount == rhs.lineCount
+            && lhs.customTitle == rhs.customTitle
+            && lhs.fileURL == rhs.fileURL
+            && lhs.cursorLocation == rhs.cursorLocation
+            && lhs.content == rhs.content
     }
 }
 

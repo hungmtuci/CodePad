@@ -381,6 +381,7 @@ struct MainEditorWorkspaceView: View {
                 NativeCodeEditorView(
                     tabID: tab.id,
                     text: tab.content,
+                    lineCount: tab.lineCount,
                     language: tab.language,
                     palette: palette,
                     preferences: store.preferences,
@@ -389,14 +390,10 @@ struct MainEditorWorkspaceView: View {
                         store.updateActiveTabContent(updatedText, immediateDetect: wasPaste)
                     },
                     onCursorChange: { ln, col, selLen in
-                        if store.activeCursorLine != ln { store.activeCursorLine = ln }
-                        if store.activeCursorColumn != col { store.activeCursorColumn = col }
-                        if store.selectedCharCount != selLen { store.selectedCharCount = selLen }
+                        EditorTelemetryStore.shared.updateCursor(line: ln, column: col, selectedCount: selLen)
                     },
                     onScrollFractionChange: { frac in
-                        if abs(store.editorScrollFraction - frac) > 0.008 {
-                            store.editorScrollFraction = frac
-                        }
+                        EditorTelemetryStore.shared.updateScroll(fraction: frac)
                     },
                     onOpenDroppedFile: { fileURL in
                         store.openFileURL(fileURL)
@@ -425,9 +422,9 @@ struct MainEditorWorkspaceView: View {
         .contentShape(Rectangle())
         .onHover { hovering in
             if hovering {
-                NSCursor.resizeLeftRight.push()
+                NSCursor.resizeLeftRight.set()
             } else {
-                NSCursor.pop()
+                NSCursor.arrow.set()
             }
         }
         .gesture(
@@ -564,30 +561,11 @@ struct MainEditorWorkspaceView: View {
     @ViewBuilder
     private func bottomSublimeStatusBar(palette: EditorThemePalette) -> some View {
         HStack(spacing: 12) {
-            Button {
-                store.isGotoLinePresented = true
-            } label: {
-                Text("Dòng \(store.activeCursorLine), Cột \(store.activeCursorColumn)")
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .buttonStyle(.plain)
-            .help("Bấm để nhảy nhanh tới dòng bất kỳ (⌃G)")
-
-            if let tab = store.activeTab {
-                if store.selectedCharCount > 0 {
-                    Text("Đã chọn \(store.selectedCharCount) ký tự")
-                        .font(.system(size: 11))
-                        .lineLimit(1)
-                        .foregroundStyle(palette.accentColor)
-                } else {
-                    Text("\(tab.lineCount) dòng • \(tab.wordCount) từ • \(tab.characterCount) ký tự")
-                        .font(.system(size: 11))
-                        .lineLimit(1)
-                        .opacity(0.75)
-                }
-            }
+            StatusBarTelemetrySummaryView(
+                tab: store.activeTab,
+                accentColor: palette.accentColor,
+                onTapGotoLine: { store.isGotoLinePresented = true }
+            )
 
             Spacer(minLength: 8)
 
@@ -641,7 +619,7 @@ struct MainEditorWorkspaceView: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: palette.isDark ? "moon.stars" : "sun.max")
-                    Text(store.preferences.followSystemAppearance ? "Auto macOS" : store.preferences.themeID.palette.id.displayName.components(separatedBy: " (").first ?? "Theme")
+                    Text(store.preferences.followSystemAppearance ? "Auto macOS" : store.preferences.themeID.shortDisplayName)
                         .lineLimit(1)
                 }
                 .font(.system(size: 11))
@@ -778,5 +756,40 @@ struct MainEditorWorkspaceView: View {
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.14), lineWidth: 1))
         .shadow(color: .black.opacity(0.24), radius: 12, y: 5)
+    }
+}
+
+/// Isolated status-bar telemetry subview so cursor movements & selections NEVER re-render the main editor or preview panes.
+private struct StatusBarTelemetrySummaryView: View {
+    @ObservedObject var telemetry = EditorTelemetryStore.shared
+    let tab: DocumentTab?
+    let accentColor: Color
+    let onTapGotoLine: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onTapGotoLine) {
+                Text("Dòng \(telemetry.cursorLine), Cột \(telemetry.cursorColumn)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .buttonStyle(.plain)
+            .help("Bấm để nhảy nhanh tới dòng bất kỳ (⌃G)")
+
+            if let tab {
+                if telemetry.selectedCharCount > 0 {
+                    Text("Đã chọn \(telemetry.selectedCharCount) ký tự")
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .foregroundStyle(accentColor)
+                } else {
+                    Text("\(tab.lineCount) dòng • \(tab.wordCount) từ • \(tab.characterCount) ký tự")
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .opacity(0.75)
+                }
+            }
+        }
     }
 }

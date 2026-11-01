@@ -7,8 +7,8 @@ cd "$PROJECT_DIR"
 
 APP_NAME="CodePad"
 BUNDLE_ID="com.hunglx.CodePad"
-VERSION="${CODEPAD_VERSION:-1.0.1}"
-BUILD_NUMBER="${CODEPAD_BUILD_NUMBER:-2}"
+VERSION="${CODEPAD_VERSION:-1.0.2}"
+BUILD_NUMBER="${CODEPAD_BUILD_NUMBER:-3}"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 ROOT_APP_BUNDLE="$ROOT_WORKSPACE_DIR/$APP_NAME.app"
 DIST_DIR="$PROJECT_DIR/dist"
@@ -195,6 +195,8 @@ codesign --verify --deep --strict "$STAGE_APP"
 
 rm -rf "$APP_BUNDLE"
 ditto --noextattr "$STAGE_APP" "$APP_BUNDLE"
+xattr -cr "$APP_BUNDLE" 2>/dev/null || true
+codesign --force --deep --sign - "$APP_BUNDLE"
 
 echo "==> [5/6] Đang tạo bộ cài đặt .DMG và .ZIP tại thư mục dist/..."
 rm -rf "$DIST_DIR"
@@ -243,6 +245,8 @@ echo "==> [6/6] Đồng bộ $ROOT_APP_BUNDLE..."
 if [ "$ROOT_WORKSPACE_DIR" != "$PROJECT_DIR" ]; then
     rm -rf "$ROOT_APP_BUNDLE"
     ditto --noextattr "$STAGE_APP" "$ROOT_APP_BUNDLE"
+    xattr -cr "$ROOT_APP_BUNDLE" 2>/dev/null || true
+    codesign --force --deep --sign - "$ROOT_APP_BUNDLE"
 fi
 
 echo "==> Hoàn tất!"

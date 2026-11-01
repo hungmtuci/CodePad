@@ -4,6 +4,7 @@ import SwiftUI
 struct NativeCodeEditorView: NSViewRepresentable {
     let tabID: UUID
     let text: String
+    let lineCount: Int
     let language: CodeLanguage
     let palette: EditorThemePalette
     let preferences: EditorPreferences
@@ -88,22 +89,92 @@ struct NativeCodeEditorView: NSViewRepresentable {
             let sel = textView.selectedRange()
             let ns = textView.string as NSString
             let safeLoc = min(sel.location, ns.length)
-
-            var line = 1
-            var lastNewlineIdx = 0
-            if safeLoc > 0 {
-                var idx = 0
-                while idx < safeLoc {
-                    if ns.character(at: idx) == 10 {
-                        line += 1
-                        lastNewlineIdx = idx + 1
-                    }
-                    idx += 1
-                }
-            }
-            let col = (safeLoc - lastNewlineIdx) + 1
+            let (line, col) = UTF16LineScanner.lineAndColumn(in: ns, upTo: safeLoc)
             parent.onCursorChange(line, col, sel.length)
         }
+    }
+}
+
+// MARK: - High-Speed Chunked UTF-16 Line & Column Scanner (Avoids Per-Char ObjC Dispatch)
+
+private enum UTF16LineScanner {
+    static func lineAndColumn(in ns: NSString, upTo limit: Int) -> (line: Int, column: Int) {
+        let clamped = min(max(0, limit), ns.length)
+        guard clamped > 0 else { return (1, 1) }
+
+        var line = 1
+        var lastNewlineIdx = 0
+        let chunkCap = 2048
+        var buf = [unichar](repeating: 0, count: min(clamped, chunkCap))
+        var offset = 0
+
+        while offset < clamped {
+            let len = min(chunkCap, clamped - offset)
+            buf.withUnsafeMutableBufferPointer { ptr in
+                guard let base = ptr.baseAddress else { return }
+                ns.getCharacters(base, range: NSRange(location: offset, length: len))
+                for i in 0..<len where base[i] == 10 {
+                    line += 1
+                    lastNewlineIdx = offset + i + 1
+                }
+            }
+            offset += len
+        }
+        return (line, (clamped - lastNewlineIdx) + 1)
+    }
+
+    static func countNewlines(in ns: NSString, upTo limit: Int) -> Int {
+        let clamped = min(max(0, limit), ns.length)
+        guard clamped > 0 else { return 0 }
+
+        var count = 0
+        let chunkCap = 2048
+        var buf = [unichar](repeating: 0, count: min(clamped, chunkCap))
+        var offset = 0
+
+        while offset < clamped {
+            let len = min(chunkCap, clamped - offset)
+            buf.withUnsafeMutableBufferPointer { ptr in
+                guard let base = ptr.baseAddress else { return }
+                ns.getCharacters(base, range: NSRange(location: offset, length: len))
+                for i in 0..<len where base[i] == 10 {
+                    count += 1
+                }
+            }
+            offset += len
+        }
+        return count
+    }
+
+    static func characterOffset(forTargetLine targetLine: Int, in ns: NSString) -> Int {
+        let total = ns.length
+        guard total > 0, targetLine > 1 else { return 0 }
+
+        var currentLine = 1
+        let chunkCap = 2048
+        var buf = [unichar](repeating: 0, count: min(total, chunkCap))
+        var offset = 0
+
+        while offset < total {
+            let len = min(chunkCap, total - offset)
+            var foundIndex: Int?
+            buf.withUnsafeMutableBufferPointer { ptr in
+                guard let base = ptr.baseAddress else { return }
+                ns.getCharacters(base, range: NSRange(location: offset, length: len))
+                for i in 0..<len where base[i] == 10 {
+                    currentLine += 1
+                    if currentLine >= targetLine {
+                        foundIndex = offset + i + 1
+                        break
+                    }
+                }
+            }
+            if let foundIndex {
+                return min(foundIndex, total)
+            }
+            offset += len
+        }
+        return total
     }
 }
 
@@ -131,6 +202,7 @@ final class CodeEditorContainerNSView: NSView {
     private var currentParagraphStyle = NSMutableParagraphStyle()
     private var isWordWrapActive: Bool = true
     private var lastSyncedContentWidth: CGFloat = 0
+    private var lastHighlightSpans: [SyntaxTokenSpan] = []
 
     override var isOpaque: Bool { true }
 
@@ -318,16 +390,20 @@ final class CodeEditorContainerNSView: NSView {
         textView.activeLanguage = state.language
         textView.activeLineColor = state.palette.activeLineNS
 
-        let targetGutterWidth: CGFloat = prefs.showLineNumbers ? computeGutterWidth(for: state.text) : 0
+        let targetGutterWidth: CGFloat = prefs.showLineNumbers ? gutterWidth(forLineCount: state.lineCount) : 0
         if gutterWidthConstraint.constant != targetGutterWidth {
             gutterWidthConstraint.constant = targetGutterWidth
             gutterView.isHidden = !prefs.showLineNumbers
         }
 
+        let wasMinimapHidden = minimapView.isHidden
         let targetMinimapWidth: CGFloat = prefs.showMinimap ? 76 : 0
         if minimapWidthConstraint.constant != targetMinimapWidth {
             minimapWidthConstraint.constant = targetMinimapWidth
             minimapView.isHidden = !prefs.showMinimap
+            if wasMinimapHidden && prefs.showMinimap {
+                minimapView.updateSnapshot(code: textStorageRef.string, spans: lastHighlightSpans, palette: currentPalette)
+            }
         }
 
         if fontChanged {
@@ -430,17 +506,29 @@ final class CodeEditorContainerNSView: NSView {
         textView.needsDisplay = true
     }
 
-    private func computeGutterWidth(for text: String) -> CGFloat {
-        var lines = 1
-        for ch in text where ch == "\n" { lines += 1 }
-        let digits = max(2, String(lines).count)
+    private func gutterWidth(forLineCount lines: Int) -> CGFloat {
+        var digits = 2
+        var n = max(1, lines)
+        if n >= 100 {
+            digits = 0
+            while n > 0 {
+                digits += 1
+                n /= 10
+            }
+        }
         return CGFloat(digits) * 8.5 + 28
+    }
+
+    private func computeGutterWidth(for text: String) -> CGFloat {
+        let ns = text as NSString
+        let lines = 1 + UTF16LineScanner.countNewlines(in: ns, upTo: ns.length)
+        return gutterWidth(forLineCount: lines)
     }
 
     func reapplySyntaxHighlighting() {
         let wasProg = coordinator?.isProgrammaticUpdate ?? false
         coordinator?.isProgrammaticUpdate = true
-        SyntaxHighlighter.applyHighlighting(
+        lastHighlightSpans = SyntaxHighlighter.applyHighlighting(
             to: textStorageRef,
             language: currentLanguage,
             palette: currentPalette,
@@ -456,7 +544,9 @@ final class CodeEditorContainerNSView: NSView {
         ]
         coordinator?.isProgrammaticUpdate = wasProg
         textView.needsDisplay = true
-        minimapView.updateSnapshot(from: textStorageRef, palette: currentPalette)
+        if !minimapView.isHidden {
+            minimapView.updateSnapshot(code: textStorageRef.string, spans: lastHighlightSpans, palette: currentPalette)
+        }
     }
 
     func refreshGutterAndMinimap() {
@@ -761,16 +851,8 @@ final class CodeTextView: NSTextView {
     private func jumpToLine(_ targetLine: Int) {
         let ns = string as NSString
         guard ns.length > 0 else { return }
-        let clamped = max(1, targetLine)
-        var currentLine = 1
-        var charIndex = 0
-        while charIndex < ns.length && currentLine < clamped {
-            if ns.character(at: charIndex) == 10 {
-                currentLine += 1
-            }
-            charIndex += 1
-        }
-        let range = NSRange(location: min(charIndex, ns.length), length: 0)
+        let charIndex = UTF16LineScanner.characterOffset(forTargetLine: max(1, targetLine), in: ns)
+        let range = NSRange(location: charIndex, length: 0)
         setSelectedRange(range)
         scrollRangeToVisible(range)
     }
@@ -841,7 +923,12 @@ final class CodeLineNumberGutterView: NSView {
     weak var textView: NSTextView?
     weak var layoutManager: NSLayoutManager?
     var palette: EditorThemePalette = EditorThemeID.monokaiPro.palette
-    var font: NSFont = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+    var font: NSFont = .monospacedSystemFont(ofSize: 11.5, weight: .regular) {
+        didSet {
+            activeBoldFont = .monospacedSystemFont(ofSize: font.pointSize, weight: .semibold)
+        }
+    }
+    private var activeBoldFont: NSFont = .monospacedSystemFont(ofSize: 11.5, weight: .semibold)
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
@@ -872,7 +959,7 @@ final class CodeLineNumberGutterView: NSView {
             .foregroundColor: palette.gutterTextNS
         ]
         let activeAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: font.pointSize, weight: .semibold),
+            .font: activeBoldFont,
             .foregroundColor: palette.plainTextNS
         ]
 
@@ -885,15 +972,7 @@ final class CodeLineNumberGutterView: NSView {
 
         let visibleGlyphRange = lm.glyphRange(forBoundingRect: visRect, in: tc)
         let firstVisibleChar = lm.characterIndexForGlyph(at: visibleGlyphRange.location)
-
-        var lineNumber = 1
-        var scanIdx = 0
-        while scanIdx < firstVisibleChar && scanIdx < ns.length {
-            if ns.character(at: scanIdx) == 10 {
-                lineNumber += 1
-            }
-            scanIdx += 1
-        }
+        var lineNumber = 1 + UTF16LineScanner.countNewlines(in: ns, upTo: min(firstVisibleChar, ns.length))
 
         var glyphIdx = visibleGlyphRange.location
         while glyphIdx < NSMaxRange(visibleGlyphRange) {
@@ -948,60 +1027,105 @@ final class SublimeMinimapView: NSView {
     var onScrubToFraction: ((CGFloat) -> Void)?
 
     private var miniLines: [[MiniLineSegment]] = []
+    private var cachedTokenColorsPaletteID: EditorThemeID?
+    private var cachedTokenColors: [SyntaxTokenKind: NSColor] = [:]
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
 
-    func updateSnapshot(from storage: NSTextStorage, palette: EditorThemePalette) {
+    private func resolveMinimapColor(for kind: SyntaxTokenKind?, in palette: EditorThemePalette) -> NSColor {
+        guard let kind else { return palette.minimapPlainNS }
+        if cachedTokenColorsPaletteID != palette.id {
+            cachedTokenColorsPaletteID = palette.id
+            var map: [SyntaxTokenKind: NSColor] = [:]
+            let allKinds: [SyntaxTokenKind] = [
+                .comment, .string, .number, .keyword, .type, .function,
+                .property, .tag, .attribute, .operatorSymbol, .decorator,
+                .heading, .emphasisBold, .emphasisItalic, .link
+            ]
+            for k in allKinds {
+                map[k] = palette.tokenNSColor(for: k).withAlphaComponent(0.75)
+            }
+            cachedTokenColors = map
+        }
+        return cachedTokenColors[kind] ?? palette.minimapPlainNS
+    }
+
+    func updateSnapshot(code: String, spans: [SyntaxTokenSpan], palette: EditorThemePalette) {
         self.palette = palette
-        let str = storage.string
-        guard !str.isEmpty else {
+        guard !code.isEmpty else {
             miniLines = []
             needsDisplay = true
             return
         }
 
-        let rawLines = str.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).prefix(650)
+        // Bulk-copy up to 65,000 UTF-16 code units once and scan linearly alongside sorted `spans`
+        // (Zero String/Substring allocations and zero Objective-C NSTextStorage attribute queries!)
+        let ns = code as NSString
+        let scanLen = min(ns.length, 65_000)
+        var buf = [unichar](repeating: 0, count: scanLen)
+        buf.withUnsafeMutableBufferPointer { ptr in
+            if let base = ptr.baseAddress {
+                ns.getCharacters(base, range: NSRange(location: 0, length: scanLen))
+            }
+        }
+
         var built: [[MiniLineSegment]] = []
-        built.reserveCapacity(rawLines.count)
+        built.reserveCapacity(min(512, max(16, scanLen / 40)))
 
-        let ns = storage.string as NSString
-        var runningOffset = 0
+        var spanCursor = 0
+        let spanCount = spans.count
+        var idx = 0
 
-        for lineSub in rawLines {
-            let lineLen = (String(lineSub) as NSString).length
-            guard lineLen > 0, runningOffset + lineLen <= ns.length else {
+        while idx < scanLen && built.count < 650 {
+            let lineStart = idx
+            while idx < scanLen && buf[idx] != 10 {
+                idx += 1
+            }
+            let lineLen = idx - lineStart
+
+            if lineLen == 0 {
                 built.append([])
-                runningOffset += lineLen + 1
+                idx += 1
                 continue
             }
 
             var segments: [MiniLineSegment] = []
             var pos = 0
             let maxCols = min(lineLen, 96)
+
             while pos < maxCols {
-                let ch = ns.character(at: runningOffset + pos)
-                if ch == 32 || ch == 9 {
+                let ch = buf[lineStart + pos]
+                if ch == 32 || ch == 9 || ch == 13 {
                     pos += 1
                     continue
                 }
                 let segStart = pos
-                let attrColor = (storage.attribute(.foregroundColor, at: runningOffset + pos, effectiveRange: nil) as? NSColor)
-                    ?? palette.plainTextNS
+                let globalOffset = lineStart + segStart
+
+                while spanCursor < spanCount && (spans[spanCursor].range.location + spans[spanCursor].range.length) <= globalOffset {
+                    spanCursor += 1
+                }
+                let matchedKind: SyntaxTokenKind? = (spanCursor < spanCount && spans[spanCursor].range.location <= globalOffset)
+                    ? spans[spanCursor].kind
+                    : nil
+                let segColor = resolveMinimapColor(for: matchedKind, in: palette)
+
                 while pos < maxCols {
-                    let c = ns.character(at: runningOffset + pos)
-                    if c == 32 || c == 9 { break }
+                    let c = buf[lineStart + pos]
+                    if c == 32 || c == 9 || c == 13 { break }
                     pos += 1
                 }
                 let segLen = pos - segStart
                 segments.append(MiniLineSegment(
                     indent: CGFloat(segStart) * 0.68,
                     width: max(1.5, CGFloat(segLen) * 0.68),
-                    color: attrColor.withAlphaComponent(0.75)
+                    color: segColor
                 ))
             }
+
             built.append(segments)
-            runningOffset += lineLen + 1
+            idx += 1
         }
 
         miniLines = built

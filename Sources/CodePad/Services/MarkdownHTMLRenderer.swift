@@ -313,6 +313,22 @@ enum MarkdownHTMLRenderer {
             btn.textContent = 'Đã chép ✓';
             setTimeout(() => { btn.textContent = old; }, 1400);
         }
+        window.__codepadSetMarkdownBody = function(nextHTML) {
+            const article = document.querySelector('article.markdown-body');
+            if (!article) return false;
+            article.innerHTML = nextHTML;
+            if (typeof window.renderMathInElement === 'function') {
+                window.renderMathInElement(article, {
+                    delimiters: [
+                        { left: '$$', right: '$$', display: true },
+                        { left: '$', right: '$', display: false },
+                        { left: '\\[', right: '\\]', display: true },
+                        { left: '\\(', right: '\\)', display: false }
+                    ]
+                });
+            }
+            return true;
+        };
         </script>
         </head>
         <body>
@@ -324,14 +340,19 @@ enum MarkdownHTMLRenderer {
         """
     }
 
+    static func renderMarkdownBodyHTML(_ markdown: String, palette: EditorThemePalette) -> String {
+        parseMarkdownToHTML(markdown, palette: palette, wordCompatible: false)
+    }
+
     private static func parseMarkdownToHTML(
         _ markdown: String,
         palette: EditorThemePalette,
         wordCompatible: Bool
     ) -> String {
-        let normalized = markdown.replacingOccurrences(of: "\r\n", with: "\n")
+        let normalized = markdown.contains("\r") ? markdown.replacingOccurrences(of: "\r\n", with: "\n") : markdown
         let lines = normalized.components(separatedBy: "\n")
         var html = ""
+        html.reserveCapacity(min(markdown.utf8.count * 2 + 128, 524_288))
         var i = 0
 
         // Strip optional YAML frontmatter at top if present
@@ -674,6 +695,13 @@ enum MarkdownHTMLRenderer {
 
     // MARK: - Code Document HTML Builder (For Source Code -> PDF / DOCX / RTF / HTML)
 
+    private static let exportTimestampFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "vi_VN")
+        df.dateFormat = "HH:mm • dd/MM/yyyy"
+        return df
+    }()
+
     static func buildCodeDocumentHTML(
         code: String,
         language: CodeLanguage,
@@ -683,11 +711,9 @@ enum MarkdownHTMLRenderer {
         includeHeaderMetadata: Bool,
         wordCompatible: Bool
     ) -> String {
-        let lineCount = max(1, code.components(separatedBy: "\n").count)
-        let dateFormatter = DateFormatter()
-        dateFormatter.locale = Locale(identifier: "vi_VN")
-        dateFormatter.dateFormat = "HH:mm • dd/MM/yyyy"
-        let timestamp = dateFormatter.string(from: Date())
+        var lineCount = 1
+        for b in code.utf8 where b == 10 { lineCount += 1 }
+        let timestamp = exportTimestampFormatter.string(from: Date())
 
         if wordCompatible {
             let highlighted = SyntaxHighlighter.highlightedHTML(

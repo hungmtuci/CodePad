@@ -250,6 +250,45 @@ enum CodeLanguage: String, CaseIterable, Codable, Identifiable, Sendable {
         }
     }
 
+    private static let extensionLookup: [String: CodeLanguage] = {
+        var map: [String: CodeLanguage] = [:]
+        for lang in Self.allCases where lang != .plainText {
+            for ext in lang.allExtensions {
+                map[ext] = lang
+            }
+        }
+        for ext in Self.plainText.allExtensions where map[ext] == nil {
+            map[ext] = .plainText
+        }
+        return map
+    }()
+
+    private static let fenceAliasLookup: [String: CodeLanguage] = {
+        var map = extensionLookup
+        for lang in Self.allCases {
+            map[lang.rawValue] = lang
+        }
+        map["bash"] = .shell
+        map["zsh"] = .shell
+        map["console"] = .shell
+        map["terminal"] = .shell
+        map["golang"] = .go
+        map["c"] = .cpp
+        map["c++"] = .cpp
+        map["cxx"] = .cpp
+        map["objc"] = .cpp
+        map["objective-c"] = .cpp
+        map["kotlin"] = .java
+        map["kt"] = .java
+        map["cs"] = .csharp
+        map["dotnet"] = .csharp
+        map["yml"] = .yaml
+        map["docker"] = .dockerfile
+        map["tex"] = .latex
+        map["math"] = .latex
+        return map
+    }()
+
     static func fromFileURL(_ url: URL) -> CodeLanguage? {
         let filename = url.lastPathComponent.lowercased()
         if filename == "dockerfile" || filename.hasPrefix("dockerfile.") {
@@ -260,15 +299,7 @@ enum CodeLanguage: String, CaseIterable, Codable, Identifiable, Sendable {
         }
         let ext = url.pathExtension.lowercased()
         guard !ext.isEmpty else { return nil }
-        for lang in Self.allCases where lang != .plainText {
-            if lang.allExtensions.contains(ext) {
-                return lang
-            }
-        }
-        if ext == "txt" || ext == "log" {
-            return .plainText
-        }
-        return nil
+        return extensionLookup[ext]
     }
 
     /// Maps fence alias (e.g. ```js, ```py, ```sh, ```c++) inside Markdown to `CodeLanguage`.
@@ -280,22 +311,6 @@ enum CodeLanguage: String, CaseIterable, Codable, Identifiable, Sendable {
             .first
             .map(String.init) ?? ""
         guard !clean.isEmpty else { return .plainText }
-        if let direct = CodeLanguage(rawValue: clean) {
-            return direct
-        }
-        for lang in Self.allCases where lang.allExtensions.contains(clean) {
-            return lang
-        }
-        switch clean {
-        case "bash", "zsh", "console", "terminal": return .shell
-        case "golang": return .go
-        case "c", "c++", "cxx", "objc", "objective-c": return .cpp
-        case "kotlin", "kt": return .java
-        case "cs", "dotnet": return .csharp
-        case "yml": return .yaml
-        case "docker": return .dockerfile
-        case "tex", "math": return .latex
-        default: return .plainText
-        }
+        return fenceAliasLookup[clean] ?? .plainText
     }
 }
