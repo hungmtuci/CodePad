@@ -3,6 +3,6 @@
 .swiftpm/
 *.xcodeproj
 xcuserdata/
-CodePad.app/
+*.app/
 dist/
 *.swp
