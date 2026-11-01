@@ -589,9 +589,9 @@ final class WorkspaceStore: ObservableObject {
             forName: NSWindow.willCloseNotification,
             object: win,
             queue: .main
-        ) { [weak self] _ in
+        ) { _ in
             Task { @MainActor in
-                self?.isFloatingPreviewWindowOpen = false
+                WorkspaceStore.shared.isFloatingPreviewWindowOpen = false
             }
         }
 

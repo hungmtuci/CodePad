@@ -48,10 +48,10 @@ final class CodePadAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         WorkspaceStore.shared.refreshSystemAppearance()
-        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { _, _ in
             Task { @MainActor in
                 WorkspaceStore.shared.refreshSystemAppearance()
-                self?.mainWindow?.backgroundColor = WorkspaceStore.shared.effectivePalette.chromeBackgroundNS
+                CodePadAppDelegate.shared.mainWindow?.backgroundColor = WorkspaceStore.shared.effectivePalette.chromeBackgroundNS
             }
         }
 

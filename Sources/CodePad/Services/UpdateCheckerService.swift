@@ -428,11 +428,11 @@ final class UpdateCheckerService: ObservableObject {
         req.timeoutInterval = 120
         req.setValue("CodePad/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
-        let tempFileURL = try await NativeChunkedDownloader.download(request: req) { [weak self] pct in
+        let tempFileURL = try await NativeChunkedDownloader.download(request: req) { pct in
             Task { @MainActor in
-                guard let self else { return }
-                if case .downloading = self.state {
-                    self.state = .downloading(version: version, progress: pct)
+                let svc = UpdateCheckerService.shared
+                if case .downloading = svc.state {
+                    svc.state = .downloading(version: version, progress: pct)
                 }
             }
         }
