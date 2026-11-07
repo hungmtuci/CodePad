@@ -298,10 +298,33 @@ final class WorkspaceStore: ObservableObject {
         showToast("Đã dán & tự nhận diện ngôn ngữ: \(detected.displayName)")
     }
 
-    func closeTab(_ id: UUID) {
+    func closeTab(_ id: UUID, force: Bool = false) {
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let tab = tabs[idx]
+
+        if !force && tab.isDirty && (!tab.content.isEmpty || tab.fileURL != nil) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Bạn có muốn lưu thay đổi vào \"\(tab.displayTitle)\" trước khi đóng tab?"
+            alert.informativeText = "Nếu chọn \"Không lưu\", mọi nội dung chưa lưu trong tab này sẽ bị xoá."
+            alert.addButton(withTitle: "Lưu")
+            alert.addButton(withTitle: "Không lưu")
+            alert.addButton(withTitle: "Huỷ")
+
+            let response = alert.runModal()
+            switch response {
+            case .alertFirstButtonReturn:
+                guard saveTab(id: id) else { return }
+            case .alertSecondButtonReturn:
+                break
+            default:
+                return
+            }
+        }
+
+        guard let removeIdx = tabs.firstIndex(where: { $0.id == id }) else { return }
         let removingActive = (activeTabID == id)
-        tabs.remove(at: idx)
+        tabs.remove(at: removeIdx)
 
         if tabs.isEmpty {
             createNewTab()
@@ -309,7 +332,7 @@ final class WorkspaceStore: ObservableObject {
         }
 
         if removingActive {
-            let nextIdx = min(idx, tabs.count - 1)
+            let nextIdx = min(removeIdx, tabs.count - 1)
             activeTabID = tabs[nextIdx].id
         }
         scheduleAutosave()
@@ -451,7 +474,18 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func saveActiveTab() {
-        guard let idx = activeTabIndex else { return }
+        guard let id = activeTabID else { return }
+        _ = saveTab(id: id)
+    }
+
+    func saveActiveTabAs() {
+        guard let id = activeTabID else { return }
+        _ = saveTabAs(id: id)
+    }
+
+    @discardableResult
+    func saveTab(id: UUID) -> Bool {
+        guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return false }
         if let existingURL = tabs[idx].fileURL {
             do {
                 try tabs[idx].content.write(to: existingURL, atomically: true, encoding: .utf8)
@@ -460,16 +494,19 @@ final class WorkspaceStore: ObservableObject {
                 recordRecentFile(existingURL)
                 saveImmediately()
                 showToast("Đã lưu \(existingURL.lastPathComponent)", revealURL: existingURL)
+                return true
             } catch {
                 showToast("Lưu tệp thất bại: \(error.localizedDescription)", isError: true)
+                return false
             }
         } else {
-            saveActiveTabAs()
+            return saveTabAs(id: id)
         }
     }
 
-    func saveActiveTabAs() {
-        guard let idx = activeTabIndex else { return }
+    @discardableResult
+    func saveTabAs(id: UUID) -> Bool {
+        guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return false }
         let tab = tabs[idx]
         let ext = tab.language.defaultExtension
         let panel = NSSavePanel()
@@ -477,7 +514,7 @@ final class WorkspaceStore: ObservableObject {
         panel.nameFieldStringValue = "\(tab.suggestedBaseFilename).\(ext)"
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        guard panel.runModal() == .OK, let dest = panel.url else { return false }
 
         do {
             try tab.content.write(to: dest, atomically: true, encoding: .utf8)
@@ -491,8 +528,10 @@ final class WorkspaceStore: ObservableObject {
             recordRecentFile(dest)
             saveImmediately()
             showToast("Đã lưu thành công: \(dest.lastPathComponent)", revealURL: dest)
+            return true
         } catch {
             showToast("Lưu tệp thất bại: \(error.localizedDescription)", isError: true)
+            return false
         }
     }
 

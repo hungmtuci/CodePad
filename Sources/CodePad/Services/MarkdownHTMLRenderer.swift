@@ -625,26 +625,7 @@ enum MarkdownHTMLRenderer {
         }
 
         var escaped = SyntaxHighlighter.escapeHTML(working)
-
-        // Images ![alt](url)
-        if let imgRegex = CachedRegex.get(#"!\[([^\]]*)\]\(([^)]+)\)"#) {
-            escaped = imgRegex.stringByReplacingMatches(
-                in: escaped,
-                options: [],
-                range: NSRange(escaped.startIndex..<escaped.endIndex, in: escaped),
-                withTemplate: #"<img src="$2" alt="$1">"#
-            )
-        }
-
-        // Links [label](url)
-        if let linkRegex = CachedRegex.get(#"\[([^\]]+)\]\(([^)]+)\)"#) {
-            escaped = linkRegex.stringByReplacingMatches(
-                in: escaped,
-                options: [],
-                range: NSRange(escaped.startIndex..<escaped.endIndex, in: escaped),
-                withTemplate: #"<a href="$2" target="_blank" rel="noopener">$1</a>"#
-            )
-        }
+        escaped = replaceMarkdownLinks(in: escaped)
 
         // Bold + Italic ***text***
         if let biRegex = CachedRegex.get(#"\*\*\*([^*]+)\*\*\*"#) {
@@ -691,6 +672,76 @@ enum MarkdownHTMLRenderer {
             escaped = escaped.replacingOccurrences(of: "\u{0002}CODE\(idx)\u{0003}", with: htmlSnippet)
         }
         return escaped
+    }
+
+    private static func sanitizeMarkdownURL(_ rawURL: String) -> String? {
+        let unescaped = rawURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+
+        let compactSchemeCheck = unescaped.unicodeScalars
+            .filter { $0.value > 0x20 }
+            .map { String($0) }
+            .joined()
+            .lowercased()
+
+        if compactSchemeCheck.hasPrefix("javascript:")
+            || compactSchemeCheck.hasPrefix("vbscript:")
+            || compactSchemeCheck.hasPrefix("data:text/html")
+            || compactSchemeCheck.hasPrefix("data:application/xhtml") {
+            return nil
+        }
+
+        return SyntaxHighlighter.escapeHTML(unescaped)
+            .replacingOccurrences(of: "'", with: "&#39;")
+    }
+
+    private static func replaceMarkdownLinks(in input: String) -> String {
+        var result = input
+
+        // Images ![alt](url)
+        if let imgRegex = CachedRegex.get(#"!\[([^\]]*)\]\(([^)]+)\)"#) {
+            let matches = imgRegex.matches(
+                in: result,
+                options: [],
+                range: NSRange(result.startIndex..<result.endIndex, in: result)
+            ).reversed()
+            for m in matches {
+                guard let fullRange = Range(m.range, in: result),
+                      let altRange = Range(m.range(at: 1), in: result),
+                      let urlRange = Range(m.range(at: 2), in: result) else { continue }
+                let altText = String(result[altRange])
+                let rawURL = String(result[urlRange])
+                if let safeURL = sanitizeMarkdownURL(rawURL) {
+                    result.replaceSubrange(fullRange, with: "<img src=\"\(safeURL)\" alt=\"\(altText)\">")
+                } else {
+                    result.replaceSubrange(fullRange, with: altText)
+                }
+            }
+        }
+
+        // Links [label](url)
+        if let linkRegex = CachedRegex.get(#"\[([^\]]+)\]\(([^)]+)\)"#) {
+            let matches = linkRegex.matches(
+                in: result,
+                options: [],
+                range: NSRange(result.startIndex..<result.endIndex, in: result)
+            ).reversed()
+            for m in matches {
+                guard let fullRange = Range(m.range, in: result),
+                      let labelRange = Range(m.range(at: 1), in: result),
+                      let urlRange = Range(m.range(at: 2), in: result) else { continue }
+                let labelText = String(result[labelRange])
+                let rawURL = String(result[urlRange])
+                let safeURL = sanitizeMarkdownURL(rawURL) ?? "#"
+                result.replaceSubrange(fullRange, with: "<a href=\"\(safeURL)\" target=\"_blank\" rel=\"noopener\">\(labelText)</a>")
+            }
+        }
+
+        return result
     }
 
     // MARK: - Code Document HTML Builder (For Source Code -> PDF / DOCX / RTF / HTML)

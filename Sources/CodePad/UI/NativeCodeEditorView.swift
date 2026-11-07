@@ -447,9 +447,24 @@ final class CodeEditorContainerNSView: NSView {
         if needsTextSwap {
             coordinator.isProgrammaticUpdate = true
             let prevSel = textView.selectedRange()
-            textView.string = state.text
-            let newLen = (state.text as NSString).length
-            let restoredLoc = tabChanged ? 0 : min(prevSel.location, newLen)
+            if tabChanged {
+                textView.string = state.text
+                textView.undoManager?.removeAllActions()
+            } else {
+                let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+                if textView.shouldChangeText(in: fullRange, replacementString: state.text) {
+                    textView.replaceCharacters(in: fullRange, with: state.text)
+                    textView.didChangeText()
+                } else {
+                    textView.string = state.text
+                }
+            }
+            let nsNew = state.text as NSString
+            let newLen = nsNew.length
+            let clampedLoc = tabChanged ? 0 : min(prevSel.location, newLen)
+            let restoredLoc = (clampedLoc < newLen)
+                ? nsNew.rangeOfComposedCharacterSequence(at: clampedLoc).location
+                : newLen
             textView.setSelectedRange(NSRange(location: restoredLoc, length: 0))
             if tabChanged {
                 scrollView.contentView.scroll(to: .zero)
@@ -642,11 +657,12 @@ final class CodeTextView: NSTextView {
             || trimmedBefore.hasSuffix("(")
             || trimmedBefore.hasSuffix(":")
 
-        let nextChar: String = (sel.upperBound < ns.length)
-            ? ns.substring(with: NSRange(location: sel.upperBound, length: 1))
-            : ""
+        let nextUnit: unichar? = (sel.upperBound < ns.length)
+            ? ns.character(at: sel.upperBound)
+            : nil
 
-        if opensBlock && (nextChar == "}" || nextChar == "]" || nextChar == ")") {
+        // UTF-16 code units: 125 = '}', 93 = ']', 41 = ')'
+        if opensBlock, let nextUnit, (nextUnit == 125 || nextUnit == 93 || nextUnit == 41) {
             let inner = "\n\(leadingWhitespace)\(indentUnit)"
             let closing = "\n\(leadingWhitespace)"
             insertText(inner + closing, replacementRange: sel)
@@ -664,8 +680,9 @@ final class CodeTextView: NSTextView {
             return
         }
         let sel = selectedRange()
+        let ns = string as NSString
         let indentUnit = useSpacesForTabs ? String(repeating: " ", count: tabWidth) : "\t"
-        if sel.length > 0 && (string as NSString).substring(with: sel).contains("\n") {
+        if sel.length > 0 && NSMaxRange(sel) <= ns.length && ns.substring(with: sel).contains("\n") {
             indentSelectedLines(outdent: false)
         } else {
             insertText(indentUnit, replacementRange: sel)
@@ -682,8 +699,8 @@ final class CodeTextView: NSTextView {
            str.count == 1,
            let closing = Self.autoPairMap[str] {
             let sel = replacementRange.location == NSNotFound ? selectedRange() : replacementRange
-            if sel.length > 0 {
-                let ns = string as NSString
+            let ns = string as NSString
+            if sel.location != NSNotFound, sel.length > 0, NSMaxRange(sel) <= ns.length {
                 let wrapped = "\(str)\(ns.substring(with: sel))\(closing)"
                 super.insertText(wrapped, replacementRange: sel)
                 setSelectedRange(NSRange(location: sel.location + 1, length: sel.length))

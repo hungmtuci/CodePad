@@ -355,10 +355,11 @@ private struct LivePreviewWebRepresentable: NSViewRepresentable {
                 title: title
             )
 
-            wv.evaluateJavaScript("window.scrollY || 0") { [weak self] val, _ in
+            wv.evaluateJavaScript("window.scrollY || 0") { [weak self, weak wv] val, _ in
                 Task { @MainActor in
+                    guard let self, let wv else { return }
                     if let num = val as? Double {
-                        self?.savedScrollY = num
+                        self.savedScrollY = num
                     }
                     wv.loadHTMLString(html, baseURL: baseURL)
                 }

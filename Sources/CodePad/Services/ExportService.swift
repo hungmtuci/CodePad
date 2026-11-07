@@ -8,7 +8,7 @@ import WebKit
 final class ExportService {
     static let shared = ExportService()
 
-    private var activePDFExporter: OffscreenWebPDFExporter?
+    private var activePDFExporters: [UUID: OffscreenWebPDFExporter] = [:]
 
     private static let cardWallpaperGradient = NSGradient(colors: [
         NSColor(srgbRed: 0.14, green: 0.18, blue: 0.28, alpha: 1.0),
@@ -231,11 +231,12 @@ final class ExportService {
 
                 do {
                     try proc.run()
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                     proc.waitUntilExit()
                     if proc.terminationStatus == 0 && FileManager.default.fileExists(atPath: destinationURL.path) {
                         continuation.resume()
                     } else {
-                        let errStr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                        let errStr = String(data: errData, encoding: .utf8) ?? ""
                         throw NSError(
                             domain: "CodePadExport",
                             code: Int(proc.terminationStatus),
@@ -252,9 +253,10 @@ final class ExportService {
     // MARK: - Paginated Vector A4 PDF via Offscreen WKWebView
 
     private func exportHTMLToPDF(html: String, baseURL: URL?, destinationURL: URL) async throws {
+        let exportID = UUID()
         let exporter = OffscreenWebPDFExporter()
-        self.activePDFExporter = exporter
-        defer { self.activePDFExporter = nil }
+        self.activePDFExporters[exportID] = exporter
+        defer { self.activePDFExporters.removeValue(forKey: exportID) }
         try await exporter.render(html: html, baseURL: baseURL, to: destinationURL)
     }
 
@@ -390,9 +392,9 @@ final class ExportService {
 private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
     private let webView: WKWebView
     private let hostWindow: NSWindow
-    private var continuation: CheckedContinuation<Void, Error>?
+    nonisolated(unsafe) private var continuation: CheckedContinuation<Void, Error>?
     private var destinationURL: URL?
-    private var safetyTimeoutItem: DispatchWorkItem?
+    nonisolated(unsafe) private var safetyTimeoutItem: DispatchWorkItem?
     private var hasStartedPrint = false
 
     override init() {
@@ -409,6 +411,19 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
         self.hostWindow.contentView = self.webView
         super.init()
         self.webView.navigationDelegate = self
+    }
+
+    deinit {
+        safetyTimeoutItem?.cancel()
+        safetyTimeoutItem = nil
+        if let cont = continuation {
+            continuation = nil
+            cont.resume(throwing: NSError(
+                domain: "CodePadExport",
+                code: -31,
+                userInfo: [NSLocalizedDescriptionKey: "Tiến trình xuất PDF đã bị huỷ trước khi hoàn tất"]
+            ))
+        }
     }
 
     func render(html: String, baseURL: URL?, to url: URL) async throws {
@@ -448,7 +463,15 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
     }
 
     private func runPaginatedPrintOrFallback() {
-        guard !hasStartedPrint, let outURL = destinationURL else { return }
+        guard !hasStartedPrint else { return }
+        guard let outURL = destinationURL else {
+            finish(with: .failure(NSError(
+                domain: "CodePadExport",
+                code: -30,
+                userInfo: [NSLocalizedDescriptionKey: "Thiếu đường dẫn tệp PDF đích"]
+            )))
+            return
+        }
         hasStartedPrint = true
 
         let pInfo = NSPrintInfo()
@@ -478,7 +501,14 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
         success: Bool,
         contextInfo: UnsafeMutableRawPointer?
     ) {
-        guard let outURL = destinationURL else { return }
+        guard let outURL = destinationURL else {
+            finish(with: .failure(NSError(
+                domain: "CodePadExport",
+                code: -30,
+                userInfo: [NSLocalizedDescriptionKey: "Thiếu đường dẫn tệp PDF đích"]
+            )))
+            return
+        }
         if success,
            let attrs = try? FileManager.default.attributesOfItem(atPath: outURL.path),
            let size = attrs[.size] as? Int, size > 200,

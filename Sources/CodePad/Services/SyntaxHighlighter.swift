@@ -98,8 +98,28 @@ enum SyntaxHighlighter {
 
     // MARK: - Core Tokenizer
 
+    private static let cacheLock = NSLock()
+    private static var lastTokenCacheKey: Int?
+    private static var lastTokenCacheSpans: [SyntaxTokenSpan] = []
+
+    static func computeCacheKey(code: String, language: CodeLanguage) -> Int {
+        var hasher = Hasher()
+        hasher.combine(language)
+        hasher.combine(code)
+        return hasher.finalize()
+    }
+
     static func tokenize(code: String, language: CodeLanguage) -> [SyntaxTokenSpan] {
         guard language != .plainText, !code.isEmpty else { return [] }
+        let cacheKey = computeCacheKey(code: code, language: language)
+        cacheLock.lock()
+        if lastTokenCacheKey == cacheKey {
+            let cached = lastTokenCacheSpans
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+
         let nsString = code as NSString
         let fullLength = nsString.length
         guard fullLength > 0 else { return [] }
@@ -128,6 +148,10 @@ enum SyntaxHighlighter {
         }
 
         spans.sort { $0.range.location < $1.range.location }
+        cacheLock.lock()
+        lastTokenCacheKey = cacheKey
+        lastTokenCacheSpans = spans
+        cacheLock.unlock()
         return spans
     }
 

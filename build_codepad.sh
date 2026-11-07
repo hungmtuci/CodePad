@@ -7,8 +7,8 @@ cd "$PROJECT_DIR"
 
 APP_NAME="CodePad"
 BUNDLE_ID="com.hunglx.CodePad"
-VERSION="${CODEPAD_VERSION:-1.0.2}"
-BUILD_NUMBER="${CODEPAD_BUILD_NUMBER:-3}"
+VERSION="${CODEPAD_VERSION:-1.0.3}"
+BUILD_NUMBER="${CODEPAD_BUILD_NUMBER:-4}"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 ROOT_APP_BUNDLE="$ROOT_WORKSPACE_DIR/$APP_NAME.app"
 DIST_DIR="$PROJECT_DIR/dist"
@@ -22,8 +22,9 @@ else
 fi
 
 echo "==> [2/6] Đang tạo biểu tượng ứng dụng (AppIcon.icns) phong cách Sublime macOS..."
-ICONSET_DIR="$PROJECT_DIR/.build/AppIcon.iconset"
-rm -rf "$ICONSET_DIR"
+STAGE_ROOT="$(mktemp -d /tmp/CodePadBuildStage.XXXXXX)"
+trap 'rm -rf "$STAGE_ROOT"' EXIT
+ICONSET_DIR="$STAGE_ROOT/AppIcon.iconset"
 mkdir -p "$ICONSET_DIR"
 
 swift - "$ICONSET_DIR" << 'SWIFT_ICON'
@@ -117,8 +118,6 @@ for (px, name) in sizes {
 SWIFT_ICON
 
 echo "==> [3/6] Đang đóng gói $APP_NAME.app..."
-STAGE_ROOT="$(mktemp -d /tmp/CodePadBuildStage.XXXXXX)"
-trap 'rm -rf "$STAGE_ROOT"' EXIT
 STAGE_APP="$STAGE_ROOT/$APP_NAME.app"
 STAGE_CONTENTS="$STAGE_APP/Contents"
 STAGE_MACOS="$STAGE_CONTENTS/MacOS"
@@ -128,7 +127,7 @@ mkdir -p "$STAGE_MACOS" "$STAGE_RESOURCES"
 cp -X "$BIN_PATH" "$STAGE_MACOS/$APP_NAME"
 chmod +x "$STAGE_MACOS/$APP_NAME"
 
-iconutil -c icns "$ICONSET_DIR" -o "$STAGE_RESOURCES/AppIcon.icns" || true
+iconutil -c icns "$ICONSET_DIR" -o "$STAGE_RESOURCES/AppIcon.icns"
 
 cat > "$STAGE_CONTENTS/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -193,11 +192,6 @@ xattr -cr "$STAGE_APP" 2>/dev/null || true
 codesign --force --deep --sign - "$STAGE_APP"
 codesign --verify --deep --strict "$STAGE_APP"
 
-rm -rf "$APP_BUNDLE"
-ditto --noextattr "$STAGE_APP" "$APP_BUNDLE"
-xattr -cr "$APP_BUNDLE" 2>/dev/null || true
-codesign --force --deep --sign - "$APP_BUNDLE"
-
 echo "==> [5/6] Đang tạo bộ cài đặt .DMG và .ZIP tại thư mục dist/..."
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
@@ -205,7 +199,7 @@ mkdir -p "$DIST_DIR"
 DMG_STAGING="$STAGE_ROOT/dmg_staging"
 mkdir -p "$DMG_STAGING"
 
-ditto --noextattr "$STAGE_APP" "$DMG_STAGING/$APP_NAME.app"
+ditto --norsrc --noextattr "$STAGE_APP" "$DMG_STAGING/$APP_NAME.app"
 ln -s /Applications "$DMG_STAGING/Applications"
 
 cat > "$DMG_STAGING/Cai_Dat_CodePad.command" << 'INSTALLER_EOF'
@@ -221,7 +215,7 @@ echo "===================================================="
 
 pkill -f "/Applications/CodePad.app" 2>/dev/null || true
 rm -rf "$APP_DST"
-ditto --noextattr "$APP_SRC" "$APP_DST"
+ditto --norsrc --noextattr "$APP_SRC" "$APP_DST"
 xattr -cr "$APP_DST" 2>/dev/null || true
 
 echo "✓ Đã cài đặt thành công tại: $APP_DST"
@@ -241,12 +235,17 @@ hdiutil create -volname "${APP_NAME} Installer" \
 ZIP_PATH="$DIST_DIR/${APP_NAME}-v${VERSION}-macOS.zip"
 ditto -c -k --norsrc --noextattr --keepParent "$STAGE_APP" "$ZIP_PATH"
 
-echo "==> [6/6] Đồng bộ $ROOT_APP_BUNDLE..."
+echo "==> [6/6] Đồng bộ $APP_BUNDLE và $ROOT_APP_BUNDLE..."
+rm -rf "$APP_BUNDLE"
+ditto --norsrc --noextattr "$STAGE_APP" "$APP_BUNDLE"
+xattr -cr "$APP_BUNDLE" 2>/dev/null || true
+codesign --verify --deep --strict "$APP_BUNDLE"
+
 if [ "$ROOT_WORKSPACE_DIR" != "$PROJECT_DIR" ]; then
     rm -rf "$ROOT_APP_BUNDLE"
-    ditto --noextattr "$STAGE_APP" "$ROOT_APP_BUNDLE"
+    ditto --norsrc --noextattr "$STAGE_APP" "$ROOT_APP_BUNDLE"
     xattr -cr "$ROOT_APP_BUNDLE" 2>/dev/null || true
-    codesign --force --deep --sign - "$ROOT_APP_BUNDLE"
+    codesign --verify --deep --strict "$ROOT_APP_BUNDLE"
 fi
 
 echo "==> Hoàn tất!"
