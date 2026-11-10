@@ -9,11 +9,13 @@ enum CodePadMain {
         if let flagIdx = args.firstIndex(of: "--verify-export"), flagIdx + 1 < args.count {
             let outDir = URL(fileURLWithPath: args[flagIdx + 1], isDirectory: true)
             let app = NSApplication.shared
-            app.setActivationPolicy(.prohibited)
+            // Use `.accessory` (WindowServer-backed without Dock icon) so NSPrintOperation / NSWMWindowCoordinator
+            // exercise the exact same GUI print pipeline as `.regular` foreground execution.
+            app.setActivationPolicy(.accessory)
             MainActor.assumeIsolated {
                 SelfVerificationRunner.run(outputDir: outDir)
             }
-            RunLoop.main.run(until: Date().addingTimeInterval(15))
+            RunLoop.main.run(until: Date().addingTimeInterval(20))
             return
         }
 

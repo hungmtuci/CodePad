@@ -488,6 +488,10 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
         let op = webView.printOperation(with: pInfo)
         op.showsPrintPanel = false
         op.showsProgressPanel = false
+        // NOTE: Keep `op.canSpawnSeparateThread` at its default (`true`)! `WKWebView`'s `WKPrintingView`
+        // relies on main-runloop IPC to the WebContent process during pagination; disabling the print thread
+        // starves main-thread IPC. Instead, `printOperationDidRun` below is marked `nonisolated` and immediately
+        // dispatches back to `DispatchQueue.main` so `NSWindow` / `WKWebView` are never touched off main thread.
         op.runModal(
             for: hostWindow,
             delegate: self,
@@ -496,11 +500,23 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
         )
     }
 
-    @objc private func printOperationDidRun(
+    /// Invoked via Objective-C `objc_msgSend` when `NSPrintOperation` finishes.
+    /// Marked `nonisolated` because AppKit's `NSConcretePrintOperation` may invoke `didRunSelector`
+    /// from a dedicated print `NSThread`; we always hop onto `DispatchQueue.main` before touching
+    /// `WKWebView`, `NSWindow`, or `@MainActor` state.
+    @objc nonisolated private func printOperationDidRun(
         _ printOperation: NSPrintOperation,
         success: Bool,
         contextInfo: UnsafeMutableRawPointer?
     ) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                self?.completePrintOperationOnMain(success: success)
+            }
+        }
+    }
+
+    private func completePrintOperationOnMain(success: Bool) {
         guard let outURL = destinationURL else {
             finish(with: .failure(NSError(
                 domain: "CodePadExport",
@@ -517,7 +533,7 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
             return
         }
 
-        // Secondary fallback using WKWebView.createPDF
+        // Secondary fallback using WKWebView.createPDF (guaranteed on main thread)
         let pdfConfig = WKPDFConfiguration()
         webView.createPDF(configuration: pdfConfig) { [weak self] result in
             Task { @MainActor in
@@ -537,12 +553,22 @@ private final class OffscreenWebPDFExporter: NSObject, WKNavigationDelegate {
     }
 
     private func finish(with result: Result<Void, Error>) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.finish(with: result)
+                }
+            }
+            return
+        }
         safetyTimeoutItem?.cancel()
         safetyTimeoutItem = nil
         guard let cont = continuation else { return }
         continuation = nil
         webView.navigationDelegate = nil
-        hostWindow.orderOut(nil)
+        if hostWindow.isVisible {
+            hostWindow.orderOut(nil)
+        }
         cont.resume(with: result)
     }
 }
